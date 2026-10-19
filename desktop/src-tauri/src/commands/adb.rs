@@ -63,6 +63,19 @@ pub fn parse_adb_devices_list(output: &str) -> Vec<(String, String)> {
     devices
 }
 
+pub fn ensure_usb_reverse_tunnels(target: &str) {
+    if target.is_empty() || target.contains(':') {
+        return;
+    }
+    let adb = get_adb_path();
+    for port in [53100, 53102, 53104, 53105] {
+        let rule = format!("tcp:{}", port);
+        let _ = Command::new(&adb)
+            .args(["-s", target, "reverse", &rule, &rule])
+            .output();
+    }
+}
+
 pub fn is_target_alive(target: &str) -> bool {
     let adb = get_adb_path();
     if let Ok(output) = Command::new(&adb).args(["devices"]).output() {
@@ -107,6 +120,7 @@ fn resolve_device_target_uncached() -> Option<String> {
     // First priority: active USB connected device (zero latency)
     let active_usb = devices.iter().find(|(s, st)| st == "device" && !s.contains(':'));
     if let Some((usb, _)) = active_usb {
+        ensure_usb_reverse_tunnels(usb);
         return Some(usb.clone());
     }
 
