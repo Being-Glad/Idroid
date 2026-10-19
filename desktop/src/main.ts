@@ -30,6 +30,8 @@ import type {
 let currentSection = 'dashboard';
 let isDndActive = false;
 let isCameraActive = false;
+let cameraRotation = 180; // 180° default fixes inverted Samsung sensor
+let isCameraMirrored = false;
 let cameraStreamStats: {
   active: boolean;
   fps: number;
@@ -1906,6 +1908,20 @@ async function handleFocusCameraPlayer() {
   } catch (_) {}
 }
 
+async function handleSetCameraOrientation(rot: number, mirror?: boolean) {
+  cameraRotation = rot;
+  if (mirror !== undefined) {
+    isCameraMirrored = mirror;
+  }
+  const invoke = await getInvoke();
+  if (invoke) {
+    try {
+      await invoke('set_camera_orientation', { rotation: cameraRotation, mirror: isCameraMirrored });
+    } catch (_) {}
+  }
+  render();
+}
+
 async function handleSwitchToWireless() {
   const invoke = await getInvoke();
   if (!invoke) return;
@@ -3603,6 +3619,31 @@ function renderCameraStudio() {
             <span>Or Mirror Native Camera App Directly</span>
           </button>
         `}
+      </div>
+
+      <!-- Camera Orientation & Rotation Toolbar -->
+      <div style="margin-top: 16px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-subtle); border-radius: 14px; padding: 12px 16px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <span style="font-size: 12px; font-weight: 700; color: #fff;">Orientation &amp; Flip:</span>
+          <span style="font-size: 11px; color: var(--text-muted);">(Current: ${cameraRotation}° ${isCameraMirrored ? '+ Mirrored' : ''})</span>
+        </div>
+        <div style="display: flex; gap: 8px; align-items: center;">
+          <button class="btn-luxury camera-rot-btn" data-rot="180" style="padding: 5px 12px; font-size: 11.5px; border-radius: 8px; cursor: pointer; background: ${cameraRotation === 180 ? 'var(--accent-solar)' : 'rgba(255,255,255,0.06)'}; color: ${cameraRotation === 180 ? '#000' : '#fff'}; font-weight: 700; border: 1px solid ${cameraRotation === 180 ? 'var(--accent-solar)' : 'var(--border-subtle)'};">
+            180° Flip (Upright)
+          </button>
+          <button class="btn-luxury camera-rot-btn" data-rot="0" style="padding: 5px 12px; font-size: 11.5px; border-radius: 8px; cursor: pointer; background: ${cameraRotation === 0 ? 'var(--accent-solar)' : 'rgba(255,255,255,0.06)'}; color: ${cameraRotation === 0 ? '#000' : '#fff'}; font-weight: 700; border: 1px solid ${cameraRotation === 0 ? 'var(--accent-solar)' : 'var(--border-subtle)'};">
+            0° Standard
+          </button>
+          <button class="btn-luxury camera-rot-btn" data-rot="90" style="padding: 5px 12px; font-size: 11.5px; border-radius: 8px; cursor: pointer; background: ${cameraRotation === 90 ? 'var(--accent-solar)' : 'rgba(255,255,255,0.06)'}; color: ${cameraRotation === 90 ? '#000' : '#fff'}; font-weight: 700; border: 1px solid ${cameraRotation === 90 ? 'var(--accent-solar)' : 'var(--border-subtle)'};">
+            90° Clockwise
+          </button>
+          <button class="btn-luxury camera-rot-btn" data-rot="270" style="padding: 5px 12px; font-size: 11.5px; border-radius: 8px; cursor: pointer; background: ${cameraRotation === 270 ? 'var(--accent-solar)' : 'rgba(255,255,255,0.06)'}; color: ${cameraRotation === 270 ? '#000' : '#fff'}; font-weight: 700; border: 1px solid ${cameraRotation === 270 ? 'var(--accent-solar)' : 'var(--border-subtle)'};">
+            270° CCW
+          </button>
+          <button class="btn-luxury" id="btn-toggle-camera-mirror" style="padding: 5px 12px; font-size: 11.5px; border-radius: 8px; cursor: pointer; background: ${isCameraMirrored ? 'var(--purple-neon)' : 'rgba(255,255,255,0.06)'}; color: #fff; font-weight: 700; border: 1px solid ${isCameraMirrored ? 'var(--purple-neon)' : 'var(--border-subtle)'};">
+            ${isCameraMirrored ? '✓ Mirror Active' : 'Mirror Flip'}
+          </button>
+        </div>
       </div>
 
       <!-- Quick Guidance -->
@@ -5352,6 +5393,20 @@ function attachEventListeners() {
 
   const btnMirrorCamHero = document.getElementById('btn-mirror-camera-app-hero');
   if (btnMirrorCamHero) btnMirrorCamHero.addEventListener('click', () => handleStartMirror());
+
+  document.querySelectorAll('.camera-rot-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const rot = parseInt(btn.getAttribute('data-rot') || '180', 10);
+      handleSetCameraOrientation(rot);
+    });
+  });
+
+  const btnToggleMirror = document.getElementById('btn-toggle-camera-mirror');
+  if (btnToggleMirror) {
+    btnToggleMirror.addEventListener('click', () => {
+      handleSetCameraOrientation(cameraRotation, !isCameraMirrored);
+    });
+  }
 
   const btnGoToMirror = document.getElementById('btn-go-to-mirror');
   if (btnGoToMirror) {

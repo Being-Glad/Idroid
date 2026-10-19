@@ -498,3 +498,13 @@ pub fn focus_camera_player() {
             .output();
     }
 }
+
+#[tauri::command]
+pub fn set_camera_orientation(rotation: u32, mirror: bool) {
+    crate::camera_server::set_camera_orientation(rotation, mirror);
+}
+
+#[tauri::command]
+pub fn get_camera_orientation() -> (u32, bool) {
+    crate::camera_server::get_camera_orientation()
+}

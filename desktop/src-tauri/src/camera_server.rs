@@ -1,6 +1,6 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -22,6 +22,19 @@ pub struct CameraStreamStats {
 static CAMERA_STATS: Mutex<Option<CameraStreamStats>> = Mutex::new(None);
 static IS_STREAM_ACTIVE: AtomicBool = AtomicBool::new(false);
 static TOTAL_FRAMES_RCVD: AtomicU64 = AtomicU64::new(0);
+static CAMERA_ROTATION: AtomicU32 = AtomicU32::new(180); // Default to 180° to fix inverted back-camera sensor
+static CAMERA_MIRROR: AtomicBool = AtomicBool::new(false);
+static RESTART_PLAYER_FLAG: AtomicBool = AtomicBool::new(false);
+
+pub fn set_camera_orientation(rotation: u32, mirror: bool) {
+    CAMERA_ROTATION.store(rotation, Ordering::SeqCst);
+    CAMERA_MIRROR.store(mirror, Ordering::SeqCst);
+    RESTART_PLAYER_FLAG.store(true, Ordering::SeqCst);
+}
+
+pub fn get_camera_orientation() -> (u32, bool) {
+    (CAMERA_ROTATION.load(Ordering::SeqCst), CAMERA_MIRROR.load(Ordering::SeqCst))
+}
 
 pub fn get_stream_stats() -> CameraStreamStats {
     if let Ok(guard) = CAMERA_STATS.lock() {
@@ -103,28 +116,54 @@ fn spawn_camera_player() -> Option<(std::process::Child, std::process::ChildStdi
         "ffplay"
     };
 
+    let rotation = CAMERA_ROTATION.load(Ordering::SeqCst);
+    let mirror = CAMERA_MIRROR.load(Ordering::SeqCst);
+
+    let mut filters: Vec<&str> = Vec::new();
+    match rotation {
+        90 => filters.push("transpose=1"),
+        180 => filters.push("vflip,hflip"),
+        270 => filters.push("transpose=2"),
+        _ => {}
+    }
+    if mirror {
+        filters.push("hflip");
+    }
+
+    let mut args: Vec<String> = vec![
+        "-f".to_string(), "h264".to_string(),
+        "-probesize".to_string(), "65536".to_string(),
+        "-sync".to_string(), "ext".to_string(),
+        "-fflags".to_string(), "nobuffer".to_string(),
+        "-flags".to_string(), "low_delay".to_string(),
+        "-framedrop".to_string(),
+        "-window_title".to_string(), "Idroid Continuity Camera (60 FPS)".to_string(),
+        "-x".to_string(), "1080".to_string(),
+        "-y".to_string(), "608".to_string(),
+        "-loglevel".to_string(), "warning".to_string(),
+    ];
+
+    if !filters.is_empty() {
+        args.push("-vf".to_string());
+        args.push(filters.join(","));
+    }
+
+    args.push("-i".to_string());
+    args.push("pipe:0".to_string());
+
     let mut cmd = std::process::Command::new(ffplay_path);
-    cmd.args([
-        "-f", "h264",
-        "-probesize", "65536",
-        "-sync", "ext",
-        "-fflags", "nobuffer",
-        "-flags", "low_delay",
-        "-framedrop",
-        "-window_title", "Idroid Continuity Camera (60 FPS)",
-        "-x", "1080",
-        "-y", "608",
-        "-loglevel", "warning",
-        "-i", "pipe:0",
-    ])
-    .stdin(std::process::Stdio::piped())
-    .stdout(std::process::Stdio::null())
-    .stderr(std::process::Stdio::null());
+    cmd.args(&args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
 
     match cmd.spawn() {
         Ok(mut child) => {
             let stdin = child.stdin.take()?;
-            println!("[Camera Server] Spawned native 60 FPS Continuity Camera display window!");
+            println!(
+                "[Camera Server] Spawned native 60 FPS Continuity Camera display window (rotation={}°, mirror={})!",
+                rotation, mirror
+            );
             Some((child, stdin))
         }
         Err(e) => {
@@ -151,6 +190,13 @@ fn handle_camera_client(mut stream: TcpStream) {
     let mut arrival_intervals: Vec<f32> = Vec::with_capacity(120);
 
     while let Ok(()) = stream.read_exact(&mut header) {
+        if RESTART_PLAYER_FLAG.swap(false, Ordering::SeqCst) {
+            if let Some((mut child, _)) = player.take() {
+                let _ = child.kill();
+            }
+            player = spawn_camera_player();
+        }
+
         let magic = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
         if magic != MAGIC_HEADER {
             eprintln!("[Camera Server] Invalid magic header: 0x{:08X}", magic);

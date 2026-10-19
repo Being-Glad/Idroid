@@ -83,14 +83,29 @@ object CameraStreamManager {
 
         Thread {
             try {
-                // 1. Establish low-latency TCP connection to Mac
-                val s = Socket()
+                // 1. Establish ultra-low-latency connection (USB-C tunnel prioritized, fallback to Wi-Fi)
+                var isUsb = false
+                var s = Socket()
                 s.tcpNoDelay = true
                 s.sendBufferSize = 128 * 1024
-                s.connect(InetSocketAddress(targetIp, targetPort), 4000)
+
+                try {
+                    // Try USB reverse tunnel on 127.0.0.1:targetPort first (<1ms latency)
+                    s.connect(InetSocketAddress("127.0.0.1", targetPort), 600)
+                    isUsb = true
+                    Log.i(TAG, "Connected via ultra-fast direct USB-C tunnel!")
+                } catch (_: Exception) {
+                    try { s.close() } catch (_: Exception) {}
+                    Log.i(TAG, "USB tunnel unavailable, falling back to Wi-Fi $targetIp:$targetPort")
+                    s = Socket()
+                    s.tcpNoDelay = true
+                    s.sendBufferSize = 128 * 1024
+                    s.connect(InetSocketAddress(targetIp, targetPort), 4000)
+                }
+
                 socket = s
                 outputStream = s.getOutputStream()
-                statusMessage.value = "Starting Hardware Encoder..."
+                statusMessage.value = if (isUsb) "Live via USB-C (High-Speed)" else "Live via Wi-Fi"
 
                 // 2. Setup Hardware H.264 Encoder
                 setupEncoder()
