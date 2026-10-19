@@ -94,11 +94,53 @@ fn run_tcp_video_server() {
     }
 }
 
+fn spawn_camera_player() -> Option<(std::process::Child, std::process::ChildStdin)> {
+    let ffplay_path = if std::path::Path::new("/usr/local/bin/ffplay").exists() {
+        "/usr/local/bin/ffplay"
+    } else if std::path::Path::new("/opt/homebrew/bin/ffplay").exists() {
+        "/opt/homebrew/bin/ffplay"
+    } else {
+        "ffplay"
+    };
+
+    let mut cmd = std::process::Command::new(ffplay_path);
+    cmd.args([
+        "-f", "h264",
+        "-probesize", "65536",
+        "-sync", "ext",
+        "-fflags", "nobuffer",
+        "-flags", "low_delay",
+        "-framedrop",
+        "-window_title", "Idroid Continuity Camera (60 FPS)",
+        "-x", "1080",
+        "-y", "608",
+        "-loglevel", "warning",
+        "-i", "pipe:0",
+    ])
+    .stdin(std::process::Stdio::piped())
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null());
+
+    match cmd.spawn() {
+        Ok(mut child) => {
+            let stdin = child.stdin.take()?;
+            println!("[Camera Server] Spawned native 60 FPS Continuity Camera display window!");
+            Some((child, stdin))
+        }
+        Err(e) => {
+            eprintln!("[Camera Server] Video player launch warning: {:?}", e);
+            None
+        }
+    }
+}
+
 fn handle_camera_client(mut stream: TcpStream) {
     let _ = stream.set_nodelay(true);
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(15)));
 
     IS_STREAM_ACTIVE.store(true, Ordering::SeqCst);
+
+    let mut player = spawn_camera_player();
 
     let mut header = [0u8; 17]; // 4 magic + 4 size + 8 ts + 1 flags
     let mut frame_count_window = 0u32;
@@ -122,8 +164,8 @@ fn handle_camera_client(mut stream: TcpStream) {
         ]);
         let _is_keyframe = header[16] == 1;
 
-        if payload_size > 10 * 1024 * 1024 {
-            eprintln!("[Camera Server] Suspiciously large frame: {} bytes", payload_size);
+        if payload_size > 10 * 1024 * 1024 || payload_size == 0 {
+            eprintln!("[Camera Server] Suspicious frame payload size: {} bytes", payload_size);
             break;
         }
 
@@ -131,6 +173,15 @@ fn handle_camera_client(mut stream: TcpStream) {
         if let Err(e) = stream.read_exact(&mut payload) {
             eprintln!("[Camera Server] Failed to read frame payload: {:?}", e);
             break;
+        }
+
+        if let Some((_, ref mut stdin)) = player {
+            if let Err(_) = stdin.write_all(&payload) {
+                eprintln!("[Camera Server] Player window closed by user");
+                player = None;
+            } else {
+                let _ = stdin.flush();
+            }
         }
 
         let now = Instant::now();
@@ -187,6 +238,10 @@ fn handle_camera_client(mut stream: TcpStream) {
             bytes_window = 0;
             window_start = Instant::now();
         }
+    }
+
+    if let Some((mut child, _)) = player {
+        let _ = child.kill();
     }
 
     IS_STREAM_ACTIVE.store(false, Ordering::SeqCst);

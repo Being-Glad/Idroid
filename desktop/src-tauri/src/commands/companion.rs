@@ -480,3 +480,21 @@ pub fn debug_log(msg: String) {
 pub fn get_camera_stream_stats() -> crate::camera_server::CameraStreamStats {
     crate::camera_server::get_stream_stats()
 }
+
+#[tauri::command]
+pub fn focus_camera_player() {
+    #[cfg(target_os = "macos")]
+    {
+        let script = r#"
+            tell application "System Events"
+                try
+                    set ffplayProc to first process whose name contains "ffplay"
+                    set frontmost of ffplayProc to true
+                end try
+            end tell
+        "#;
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", script])
+            .output();
+    }
+}

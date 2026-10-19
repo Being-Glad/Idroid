@@ -121,6 +121,7 @@ pub fn run() {
       commands::sync_mirror_dock,
       commands::sync_mirror_frame,
       commands::get_camera_stream_stats,
+      commands::focus_camera_player,
     ])
     .on_window_event(|_window, event| {
       if let tauri::WindowEvent::CloseRequested { .. } = event {

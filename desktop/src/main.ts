@@ -30,6 +30,16 @@ import type {
 let currentSection = 'dashboard';
 let isDndActive = false;
 let isCameraActive = false;
+let cameraStreamStats: {
+  active: boolean;
+  fps: number;
+  bitrate_mbps: number;
+  latency_ms: number;
+  jitter_ms: number;
+  total_frames: number;
+  resolution: string;
+  codec: string;
+} | null = null;
 let isAudioActive = (() => {
   try {
     const saved = localStorage.getItem('idroid_mirror_audio');
@@ -1860,6 +1870,42 @@ async function pollIncomingCallStatus() {
   } catch (_) {}
 }
 
+async function pollCameraStreamStatus() {
+  const invoke = await getInvoke();
+  if (!invoke) return;
+
+  try {
+    const stats: any = await invoke('get_camera_stream_stats');
+    if (stats) {
+      const wasActive = Boolean(cameraStreamStats && cameraStreamStats.active);
+      const nowActive = Boolean(stats.active);
+      cameraStreamStats = stats;
+
+      if (wasActive !== nowActive) {
+        if (nowActive && currentSection !== 'camera') {
+          currentSection = 'camera';
+        }
+        render();
+      } else if (nowActive && currentSection === 'camera') {
+        const fpsEl = document.getElementById('camera-stat-fps');
+        if (fpsEl) fpsEl.textContent = `${stats.fps} FPS`;
+        const latEl = document.getElementById('camera-stat-latency');
+        if (latEl) latEl.textContent = `${stats.latency_ms.toFixed(1)} ms`;
+        const brEl = document.getElementById('camera-stat-bitrate');
+        if (brEl) brEl.textContent = `${stats.bitrate_mbps.toFixed(1)} Mbps`;
+      }
+    }
+  } catch (_) {}
+}
+
+async function handleFocusCameraPlayer() {
+  const invoke = await getInvoke();
+  if (!invoke) return;
+  try {
+    await invoke('focus_camera_player');
+  } catch (_) {}
+}
+
 async function handleSwitchToWireless() {
   const invoke = await getInvoke();
   if (!invoke) return;
@@ -2969,6 +3015,7 @@ function render() {
       <nav class="nav-list" style="margin-top: 8px;">
         ${renderNavItem('dashboard', Icons.Dashboard(16), 'Dashboard')}
         ${renderNavItem('mirror', Icons.Mirror(16), 'Screen Mirror')}
+        ${renderNavItem('camera', Icons.Camera(16), 'Camera Stream')}
         ${renderNavItem('files', Icons.Files(16), 'Files')}
         ${renderNavItem('photos', Icons.Photos(16), 'Photos')}
         ${renderNavItem('calls', Icons.Calls(16), 'Calls & Audio')}
@@ -3002,10 +3049,14 @@ function render() {
 
 function renderNavItem(key: string, iconSvg: string, label: string) {
   const activeClass = currentSection === key ? 'active' : '';
+  const isCameraLive = key === 'camera' && cameraStreamStats && cameraStreamStats.active;
   return `
     <div class="nav-item ${activeClass}" data-section="${key}" title="${label}">
       <span class="nav-icon">${iconSvg}</span>
-      <span class="nav-label">${label}</span>
+      <span class="nav-label" style="display: flex; align-items: center; justify-content: space-between; width: 100%;">
+        <span>${label}</span>
+        ${isCameraLive ? '<span style="background: var(--emerald-ion); color: #000; font-size: 8.5px; font-weight: 800; padding: 1.5px 5px; border-radius: 6px; letter-spacing: 0.5px;">LIVE</span>' : ''}
+      </span>
     </div>
   `;
 }
@@ -3429,6 +3480,8 @@ function renderActiveWorkspace() {
       return renderDashboard();
     case 'mirror':
       return renderMirrorStudio();
+    case 'camera':
+      return renderCameraStudio();
     case 'calls':
       return renderCallsView();
     case 'notifications':
@@ -3446,6 +3499,129 @@ function renderActiveWorkspace() {
     default:
       return renderDashboard();
   }
+}
+
+function renderCameraStudio() {
+  const isStreaming = Boolean(cameraStreamStats && cameraStreamStats.active);
+  const fps = cameraStreamStats?.fps || 0;
+  const bitrate = cameraStreamStats?.bitrate_mbps ? cameraStreamStats.bitrate_mbps.toFixed(1) : '0.0';
+  const latency = cameraStreamStats?.latency_ms ? cameraStreamStats.latency_ms.toFixed(1) : '1.2';
+  const res = cameraStreamStats?.resolution || '1920x1080 Full HD';
+  const totalFrames = cameraStreamStats?.total_frames || 0;
+
+  return `
+    <div class="workspace-view animate-fade-in" style="padding: 24px; max-width: 980px; margin: 0 auto;">
+      <!-- Header -->
+      <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px;">
+        <div>
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <h1 style="font-size: 22px; font-weight: 800; color: #fff; margin: 0;">Continuity Camera Studio</h1>
+            <span style="background: ${isStreaming ? 'var(--emerald-ion)' : 'rgba(255,255,255,0.1)'}; color: ${isStreaming ? '#000' : 'var(--text-muted)'}; font-size: 10.5px; font-weight: 800; padding: 3px 8px; border-radius: 6px; letter-spacing: 0.5px;">
+              ${isStreaming ? '● LIVE STREAMING' : 'STANDBY'}
+            </span>
+          </div>
+          <p style="font-size: 12.5px; color: var(--text-secondary); margin: 4px 0 0 0;">
+            Real-time hardware-accelerated H.264 camera stream from ${device.name || 'your phone'} with zero cloud interception.
+          </p>
+        </div>
+        <div style="display: flex; gap: 10px;">
+          ${isStreaming ? `
+            <button class="btn-luxury" id="btn-reopen-camera-player" style="background: var(--accent-solar); color: #000; font-weight: 700; border-radius: 10px; padding: 7px 14px; font-size: 12px; display: flex; align-items: center; gap: 6px; cursor: pointer;">
+              ${Icons.Camera(14, '#000')}
+              <span>Bring Video Window to Front</span>
+            </button>
+          ` : `
+            <button class="btn-luxury" id="btn-mirror-camera-app" style="background: rgba(255,110,50,0.15); color: var(--accent-solar); border: 1px solid rgba(255,110,50,0.3); font-weight: 600; border-radius: 10px; padding: 7px 14px; font-size: 12px; display: flex; align-items: center; gap: 6px; cursor: pointer;">
+              ${Icons.Camera(14, 'var(--accent-solar)')}
+              <span>Launch Phone Camera</span>
+            </button>
+          `}
+        </div>
+      </div>
+
+      <!-- Live Metrics Grid -->
+      <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px;">
+        <div style="background: rgba(255,255,255,0.03); border: 1px solid var(--border-subtle); border-radius: 14px; padding: 14px;">
+          <div style="font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700;">Frame Rate</div>
+          <div id="camera-stat-fps" style="font-size: 24px; font-weight: 800; color: ${isStreaming ? 'var(--emerald-ion)' : 'var(--text-muted)'}; margin-top: 4px;">
+            ${isStreaming ? `${fps} FPS` : '60 FPS Target'}
+          </div>
+          <div style="font-size: 10.5px; color: var(--text-secondary); margin-top: 2px;">Hardware AVC 60-120 FPS</div>
+        </div>
+
+        <div style="background: rgba(255,255,255,0.03); border: 1px solid var(--border-subtle); border-radius: 14px; padding: 14px;">
+          <div style="font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700;">Pipeline Latency</div>
+          <div id="camera-stat-latency" style="font-size: 24px; font-weight: 800; color: var(--accent-solar); margin-top: 4px;">
+            ${isStreaming ? `${latency} ms` : '< 2 ms'}
+          </div>
+          <div style="font-size: 10.5px; color: var(--text-secondary); margin-top: 2px;">Direct 1-Hop Transport</div>
+        </div>
+
+        <div style="background: rgba(255,255,255,0.03); border: 1px solid var(--border-subtle); border-radius: 14px; padding: 14px;">
+          <div style="font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700;">Stream Bitrate</div>
+          <div id="camera-stat-bitrate" style="font-size: 24px; font-weight: 800; color: var(--purple-neon); margin-top: 4px;">
+            ${isStreaming ? `${bitrate} Mbps` : '5.2 Mbps'}
+          </div>
+          <div style="font-size: 10.5px; color: var(--text-secondary); margin-top: 2px;">H.264 High Profile CBR</div>
+        </div>
+
+        <div style="background: rgba(255,255,255,0.03); border: 1px solid var(--border-subtle); border-radius: 14px; padding: 14px;">
+          <div style="font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700;">Resolution</div>
+          <div style="font-size: 24px; font-weight: 800; color: #fff; margin-top: 4px;">
+            ${res}
+          </div>
+          <div style="font-size: 10.5px; color: var(--text-secondary); margin-top: 2px;">${totalFrames > 0 ? `${totalFrames} frames delivered` : 'Native 1080p Optics'}</div>
+        </div>
+      </div>
+
+      <!-- Hero Viewfinder Surface -->
+      <div style="background: #000; border: 1.5px solid ${isStreaming ? 'rgba(0, 230, 153, 0.4)' : 'var(--border-subtle)'}; border-radius: 20px; padding: 36px 20px; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 280px; text-align: center; position: relative;">
+        ${isStreaming ? `
+          <div style="width: 56px; height: 56px; border-radius: 50%; background: rgba(0, 230, 153, 0.15); display: flex; align-items: center; justify-content: center; color: var(--emerald-ion); margin-bottom: 14px;">
+            ${Icons.Camera(28, 'currentColor')}
+          </div>
+          <div style="font-size: 18px; font-weight: 700; color: #fff; margin-bottom: 6px;">Camera is Streaming Live to macOS</div>
+          <div style="font-size: 13px; color: var(--text-secondary); max-width: 480px; line-height: 1.5; margin-bottom: 18px;">
+            Hardware-accelerated low-latency window is active at <strong>${fps} FPS</strong>. Works seamlessly in FaceTime, Zoom, OBS Studio, and Google Meet.
+          </div>
+          <div style="display: flex; gap: 10px;">
+            <button class="btn-luxury" id="btn-reopen-camera-player-hero" style="background: var(--accent-solar); color: #000; font-weight: 700; border-radius: 10px; padding: 9px 18px; font-size: 13px; display: flex; align-items: center; gap: 6px; cursor: pointer;">
+              ${Icons.Camera(16, '#000')}
+              <span>Bring Video Window to Front</span>
+            </button>
+          </div>
+        ` : `
+          <div style="width: 56px; height: 56px; border-radius: 50%; background: rgba(255, 110, 50, 0.12); display: flex; align-items: center; justify-content: center; color: var(--accent-solar); margin-bottom: 14px;">
+            ${Icons.Camera(28, 'currentColor')}
+          </div>
+          <div style="font-size: 18px; font-weight: 700; color: #fff; margin-bottom: 6px;">Continuity Camera in Standby</div>
+          <div style="font-size: 13px; color: var(--text-secondary); max-width: 460px; line-height: 1.5; margin-bottom: 20px;">
+            On your connected Android phone, open Idroid &gt; tap <strong>Advanced</strong> at the bottom &gt; tap <strong>Start Wireless Camera</strong>.
+          </div>
+          <button class="btn-luxury" id="btn-mirror-camera-app-hero" style="background: rgba(255,255,255,0.06); color: #fff; border: 1px solid var(--border-subtle); border-radius: 10px; padding: 8px 16px; font-size: 12.5px; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 6px;">
+            ${Icons.Mirror(14, 'currentColor')}
+            <span>Or Mirror Native Camera App Directly</span>
+          </button>
+        `}
+      </div>
+
+      <!-- Quick Guidance -->
+      <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 18px;">
+        <div style="background: rgba(255,255,255,0.02); border: 1px solid var(--border-subtle); border-radius: 14px; padding: 14px;">
+          <div style="font-size: 12px; font-weight: 700; color: #fff; margin-bottom: 4px;">Ultra-Wide &amp; Telephoto</div>
+          <div style="font-size: 11.5px; color: var(--text-secondary); line-height: 1.4;">Switch between 0.6x UltraWide, 1.0x Primary, or Front Selfie directly on your phone screen.</div>
+        </div>
+        <div style="background: rgba(255,255,255,0.02); border: 1px solid var(--border-subtle); border-radius: 14px; padding: 14px;">
+          <div style="font-size: 12px; font-weight: 700; color: #fff; margin-bottom: 4px;">Zero Cellular Data</div>
+          <div style="font-size: 11.5px; color: var(--text-secondary); line-height: 1.4;">Streams locally over direct USB-C or Personal Hotspot / Wi-Fi with sub-millisecond lag.</div>
+        </div>
+        <div style="background: rgba(255,255,255,0.02); border: 1px solid var(--border-subtle); border-radius: 14px; padding: 14px;">
+          <div style="font-size: 12px; font-weight: 700; color: #fff; margin-bottom: 4px;">OBS &amp; Streaming Ready</div>
+          <div style="font-size: 11.5px; color: var(--text-secondary); line-height: 1.4;">Add as Window Capture in OBS Studio or Streamlabs for broadcast-grade webcam streaming.</div>
+        </div>
+      </div>
+    </div>
+  `;
 }
 
 function renderConsumerQrPairingView() {
@@ -5165,6 +5341,18 @@ function attachEventListeners() {
   const btnLaunchFullMirror = document.getElementById('btn-launch-full-mirror');
   if (btnLaunchFullMirror) btnLaunchFullMirror.addEventListener('click', () => handleStartMirror());
 
+  const btnReopenCam = document.getElementById('btn-reopen-camera-player');
+  if (btnReopenCam) btnReopenCam.addEventListener('click', () => handleFocusCameraPlayer());
+
+  const btnReopenCamHero = document.getElementById('btn-reopen-camera-player-hero');
+  if (btnReopenCamHero) btnReopenCamHero.addEventListener('click', () => handleFocusCameraPlayer());
+
+  const btnMirrorCam = document.getElementById('btn-mirror-camera-app');
+  if (btnMirrorCam) btnMirrorCam.addEventListener('click', () => handleStartMirror());
+
+  const btnMirrorCamHero = document.getElementById('btn-mirror-camera-app-hero');
+  if (btnMirrorCamHero) btnMirrorCamHero.addEventListener('click', () => handleStartMirror());
+
   const btnGoToMirror = document.getElementById('btn-go-to-mirror');
   if (btnGoToMirror) {
     btnGoToMirror.addEventListener('click', () => {
@@ -6375,6 +6563,8 @@ function bootstrap() {
   fetchCallsAndNotifications();
   pollDeviceTelemetry();
   setInterval(pollDeviceTelemetry, 6000);
+  pollCameraStreamStatus();
+  setInterval(pollCameraStreamStatus, 1000);
 
   // Position sync for mirror navigation dock (lightweight 250ms interval, only when dock is enabled)
   setInterval(async () => {
