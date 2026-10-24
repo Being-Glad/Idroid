@@ -16,7 +16,7 @@ class TcpClientTest {
 
     @Test
     fun testBuildCandidateHostsInjectsUsbLoopbackFallback() {
-        val candidates = TcpClient.buildCandidateHosts("192.168.1.6")
+        val candidates = TcpClient.buildCandidateHosts("192.168.1.6", includeArp = false)
         assertEquals(2, candidates.size)
         assertEquals("192.168.1.6", candidates[0])
         assertEquals("127.0.0.1", candidates[1])
@@ -24,7 +24,7 @@ class TcpClientTest {
 
     @Test
     fun testBuildCandidateHostsDeduplicatesLoopback() {
-        val candidates = TcpClient.buildCandidateHosts("127.0.0.1")
+        val candidates = TcpClient.buildCandidateHosts("127.0.0.1", includeArp = false)
         assertEquals("Should not duplicate 127.0.0.1 if it is the primary host", 1, candidates.size)
         assertEquals("127.0.0.1", candidates[0])
     }
@@ -32,7 +32,7 @@ class TcpClientTest {
     @Test
     fun testBuildCandidateHostsPreservesOrderAndFallbacks() {
         val fallbacks = listOf("192.168.43.1", "192.168.1.6")
-        val candidates = TcpClient.buildCandidateHosts("192.168.1.6", fallbacks)
+        val candidates = TcpClient.buildCandidateHosts("192.168.1.6", fallbacks, includeArp = false)
         assertEquals(3, candidates.size)
         assertEquals("192.168.1.6", candidates[0])
         assertEquals("192.168.43.1", candidates[1])
@@ -54,7 +54,7 @@ class TcpClientTest {
     @Test
     fun testClassifyConnectionErrorIdentifiesApIsolation() {
         val err1 = "java.net.ConnectException: failed to connect to /192.168.1.6 (port 53100) from /192.168.1.12: connect failed: EHOSTUNREACH (No route to host)"
-        val classification1 = TcpClient.classifyConnectionError(err1, "192.168.1.6", 53100)
+        val classification1 = TcpClient.classifyConnectionError(err1, "192.168.1.6", 53100, phoneIpOverride = "192.168.1.12")
         assertTrue(classification1.contains("Router") || classification1.contains("AP Isolation") || classification1.contains("Wi-Fi"))
         assertTrue(classification1.contains("Personal Hotspot") || classification1.contains("Hotspot"))
     }
@@ -62,7 +62,7 @@ class TcpClientTest {
     @Test
     fun testClassifyConnectionErrorIdentifiesConnectionRefused() {
         val err = "java.net.ConnectException: failed to connect to /192.168.1.6 (port 53100): connect failed: ECONNREFUSED (Connection refused)"
-        val classification = TcpClient.classifyConnectionError(err, "192.168.1.6", 53100)
+        val classification = TcpClient.classifyConnectionError(err, "192.168.1.6", 53100, phoneIpOverride = "192.168.1.12")
         assertTrue(classification.contains("Idroid is Closed on Mac") || classification.contains("Connection refused") || classification.contains("closed"))
     }
 

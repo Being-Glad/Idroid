@@ -59,7 +59,7 @@ class TcpClient(
          * 2. Any connected peers from the kernel ARP table (Hotspot peer, e.g. 10.x or 192.168.43.x)
          * 3. 127.0.0.1 (USB Reverse Tunnel) so USB fallback works seamlessly
          */
-        fun buildCandidateHosts(primary: String, fallbacks: List<String> = emptyList()): List<String> {
+        fun buildCandidateHosts(primary: String, fallbacks: List<String> = emptyList(), includeArp: Boolean = true): List<String> {
             val list = mutableListOf<String>()
             val primaryTrimmed = primary.trim()
             if (primaryTrimmed.isNotBlank()) {
@@ -71,10 +71,12 @@ class TcpClient(
                     list.add(trimmed)
                 }
             }
-            val arpPeers = getArpPeers()
-            for (peer in arpPeers) {
-                if (!list.contains(peer)) {
-                    list.add(peer)
+            if (includeArp) {
+                val arpPeers = getArpPeers()
+                for (peer in arpPeers) {
+                    if (!list.contains(peer)) {
+                        list.add(peer)
+                    }
                 }
             }
             // Always include USB loopback reverse tunnel fallback
@@ -87,8 +89,8 @@ class TcpClient(
         /**
          * Classifies socket exceptions into actionable, non-confusing diagnostic messages.
          */
-        fun classifyConnectionError(errMsg: String, host: String, port: Int, context: Context? = null): String {
-            val report = NetworkDiagnostics.diagnose(context, host, port, null, errMsg, false)
+        fun classifyConnectionError(errMsg: String, host: String, port: Int, context: Context? = null, phoneIpOverride: String? = null): String {
+            val report = NetworkDiagnostics.diagnose(context, host, port, null, errMsg, false, phoneIpOverride)
             return "${report.headline}: ${report.explanation} ${report.actionPrompt}"
         }
     }
