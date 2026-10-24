@@ -22,3 +22,16 @@ export async function safeInvoke<T>(cmd: string, args: Record<string, any> = {})
     throw err;
   }
 }
+
+let cachedListen: any = null;
+
+export async function getListen(): Promise<any> {
+  if (cachedListen) return cachedListen;
+  try {
+    const { listen } = await import('@tauri-apps/api/event');
+    cachedListen = listen;
+    return listen;
+  } catch (err) {
+    return null;
+  }
+}

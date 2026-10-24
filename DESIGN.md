@@ -44,9 +44,8 @@ In accordance with our **Anti-Slop (SlopMonster)** guidelines:
 
 ### 2.2 Typography (Google Sans Flex / Inter / San Francisco)
 
-- **macOS Primary**: `SF Pro` / `Google Sans Flex`
-- **Android Primary**: `Google Sans Flex` / `Roboto`
-- **Windows Primary**: `Segoe UI Variable` / `Inter`
+- **macOS Primary**: `SF Pro` / `Google Sans Flex` / `Inter`
+- **Android Primary**: `Inter` / `Roboto`
 
 | Role | Weight | Size | Line Height | Tracking | Token |
 | :--- | :---: | :---: | :---: | :---: | :--- |

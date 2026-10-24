@@ -3,7 +3,43 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+
+    <!-- Android Antenna safely inside Android 72dp safe zone (never clipped) -->
     <path
-        android:fillColor="#FF6E32"
-        android:pathData="M54,20 C35.2,20 20,35.2 20,54 C20,72.8 35.2,88 54,88 C72.8,88 88,72.8 88,54 C88,35.2 72.8,20 54,20 Z"/>
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="3.6"
+        android:strokeLineCap="round"
+        android:pathData="M68,36 L76,24" />
+
+    <!-- Finder Profile Nose Highlight Contour -->
+    <path
+        android:fillColor="#5AC8FA"
+        android:pathData="M54,26 L54,38 C47,38 43,44 43,52 C43,60 47,66 54,66 L54,88 L54,26 Z" />
+
+    <!-- Android Horizontal Visor Cut Line -->
+    <path
+        android:fillColor="#1B7A42"
+        android:pathData="M54,66 L86,66 L86,69 L54,69 Z" />
+
+    <!-- Left Eye (Finder Dark Navy Oval) -->
+    <path
+        android:fillColor="#072244"
+        android:pathData="M35,52 C35,48.5 37,46 39,46 C41,46 43,48.5 43,52 C43,55.5 41,58 39,58 C37,58 35,55.5 35,52 Z" />
+
+    <!-- Right Eye (Android Crisp White Circle) -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M69,52 C69,48.5 71.5,46 74.5,46 C77.5,46 80,48.5 80,52 C80,55.5 77.5,58 74.5,58 C71.5,58 69,55.5 69,52 Z" />
+
+    <!-- Joyful Continuous Shared Smile -->
+    <path
+        android:strokeColor="#072244"
+        android:strokeWidth="3.8"
+        android:strokeLineCap="round"
+        android:pathData="M32,74 C42,84 66,84 76,74" />
+    <path
+        android:strokeColor="#0F542A"
+        android:strokeWidth="3.8"
+        android:strokeLineCap="round"
+        android:pathData="M54,81 C64,81 71,78 76,74" />
 </vector>

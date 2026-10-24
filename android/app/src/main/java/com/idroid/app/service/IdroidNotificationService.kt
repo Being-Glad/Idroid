@@ -1,5 +1,8 @@
 package com.idroid.app.service
 
+import android.app.RemoteInput
+import android.content.Intent
+import android.os.Bundle
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import com.idroid.app.model.IdroidMessage
@@ -8,6 +11,63 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
 class IdroidNotificationService : NotificationListenerService() {
+
+    companion object {
+        @Volatile
+        var instance: IdroidNotificationService? = null
+            private set
+
+        /**
+         * Executes an inline remote input reply to an active notification (e.g. WhatsApp, Messages)
+         * without launching the app on the phone screen.
+         */
+        fun replyToNotification(notifKey: String, text: String): Boolean {
+            val service = instance ?: return false
+            try {
+                val sbns = service.activeNotifications ?: return false
+                val targetSbn = sbns.find {
+                    it.key == notifKey || it.id.toString() == notifKey || it.packageName == notifKey
+                } ?: return false
+
+                val actions = targetSbn.notification.actions ?: return false
+                for (action in actions) {
+                    val remoteInputs = action.remoteInputs ?: continue
+                    if (remoteInputs.isNotEmpty()) {
+                        val intent = Intent()
+                        val bundle = Bundle()
+                        for (input in remoteInputs) {
+                            bundle.putCharSequence(input.resultKey, text)
+                        }
+                        RemoteInput.addResultsToIntent(remoteInputs, intent, bundle)
+                        action.actionIntent.send(service, 0, intent)
+                        return true
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+            return false
+        }
+    }
+
+    override fun onListenerConnected() {
+        super.onListenerConnected()
+        instance = this
+    }
+
+    override fun onListenerDisconnected() {
+        super.onListenerDisconnected()
+        if (instance == this) {
+            instance = null
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        if (instance == this) {
+            instance = null
+        }
+    }
 
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
         super.onNotificationPosted(sbn)
@@ -23,7 +83,7 @@ class IdroidNotificationService : NotificationListenerService() {
 
     override fun onNotificationRemoved(sbn: StatusBarNotification?) {
         super.onNotificationRemoved(sbn)
-        val id = sbn?.id?.toString() ?: return
+        val id = sbn?.key ?: sbn?.id?.toString() ?: return
         val message = IdroidMessage(
             type = "notification_removed",
             payload = mapOf("notificationId" to id)
@@ -55,7 +115,7 @@ class IdroidNotificationService : NotificationListenerService() {
 
         onValid(
             NotificationPayload(
-                notificationId = sbn.id.toString(),
+                notificationId = sbn.key ?: sbn.id.toString(),
                 packageName = sbn.packageName,
                 appName = appName,
                 title = title,

@@ -16,14 +16,24 @@ val InterFontFamily = FontFamily(
     Font(R.font.inter)
 )
 
-// Obsidian Titanium Color System
+// Idroid Dual-Tone Brand System (Finder Blue & Android Robot Green)
 val ObsidianVoid = Color(0xFF090A0E)
 val ObsidianSurface = Color(0xFF12151E)
 val ObsidianSurfaceVariant = Color(0xFF181C28)
 val ObsidianBorder = Color(0xFF262C3D)
-val SolarOrange = Color(0xFFFA6400)
-val ElectricBlue = Color(0xFF3B82F6)
-val EmeraldBeacon = Color(0xFF10B981)
+
+// Brand Accents derived directly from the Idroid Logo
+val FinderBlue = Color(0xFF007AFF)          // Classic Apple Finder Blue
+val FinderBlueBright = Color(0xFF38B6FF)    // Vibrant Cyan / High-Visibility Blue
+val AndroidGreen = Color(0xFF1EB05E)        // Core Android Robot Green
+val AndroidGreenBright = Color(0xFF4AE38B)  // Radiant Emerald / Antenna Green
+
+// Primary and Secondary Brand Tokens
+val IdroidPrimary = FinderBlueBright
+val IdroidSecondary = AndroidGreenBright
+val SolarOrange = FinderBlueBright          // Global migration alias from old orange to Finder Blue
+val ElectricBlue = FinderBlueBright
+val EmeraldBeacon = AndroidGreenBright
 val CrimsonDanger = Color(0xFFEF4444)
 val PureWhite = Color(0xFFFFFFFF)
 val TextPrimary = Color(0xFFF8FAFC)
@@ -31,8 +41,10 @@ val TextSecondary = Color(0xFF94A3B8)
 val TextMuted = Color(0xFF64748B)
 
 private val DarkColorScheme = darkColorScheme(
-    primary = SolarOrange,
+    primary = FinderBlueBright,
     onPrimary = PureWhite,
+    secondary = AndroidGreenBright,
+    onSecondary = PureWhite,
     background = ObsidianVoid,
     onBackground = TextPrimary,
     surface = ObsidianSurface,

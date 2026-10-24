@@ -3,11 +3,81 @@ use super::adb::{adb_command, is_device_connected};
 use super::apps::{find_companion_icon_bytes, map_package_to_app};
 
 unsafe extern "C" {
-    fn post_mac_notification(
+    pub fn post_mac_notification(
         title: *const std::ffi::c_char,
         subtitle: *const std::ffi::c_char,
         message: *const std::ffi::c_char,
     );
+    pub fn post_mac_notification_full(
+        title: *const std::ffi::c_char,
+        subtitle: *const std::ffi::c_char,
+        message: *const std::ffi::c_char,
+        has_reply: std::ffi::c_int,
+        notif_id: *const std::ffi::c_char,
+    );
+    pub fn post_mac_incoming_call_notification(
+        caller_name: *const std::ffi::c_char,
+        caller_number: *const std::ffi::c_char,
+    );
+    pub fn cancel_mac_call_notifications();
+    pub fn get_mac_pasteboard_change_count() -> std::ffi::c_long;
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn on_mac_notification_reply(c_id: *const std::ffi::c_char, c_text: *const std::ffi::c_char) {
+    if c_id.is_null() || c_text.is_null() {
+        return;
+    }
+    let notif_id = unsafe { std::ffi::CStr::from_ptr(c_id) }.to_string_lossy().to_string();
+    let reply_text = unsafe { std::ffi::CStr::from_ptr(c_text) }.to_string_lossy().to_string();
+    if !notif_id.is_empty() && !reply_text.is_empty() {
+        let _ = reply_notification(notif_id, reply_text);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn on_mac_call_notification_action(c_action: *const std::ffi::c_char, c_number: *const std::ffi::c_char) {
+    if c_action.is_null() { return; }
+    let action = unsafe { std::ffi::CStr::from_ptr(c_action) }.to_string_lossy().to_string();
+    let number = if !c_number.is_null() {
+        unsafe { std::ffi::CStr::from_ptr(c_number) }.to_string_lossy().to_string()
+    } else {
+        String::new()
+    };
+    println!("[Idroid Calls] Native macOS Call Notification Action clicked: {} (number: {})", action, number);
+    match action.as_str() {
+        "accept_mac" => {
+            let _ = super::calls::answer_phone_call();
+            let _ = super::calls::set_call_audio_route("mac".into());
+        }
+        "answer_phone" => {
+            let _ = super::calls::answer_phone_call();
+            let _ = super::calls::set_call_audio_route("phone".into());
+        }
+        "decline" => {
+            let _ = super::calls::end_phone_call();
+        }
+        _ => {}
+    }
+}
+
+pub fn notify_mac_incoming_call(name: &str, number: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        use std::ffi::CString;
+        let c_name = CString::new(name).unwrap_or_default();
+        let c_num = CString::new(number).unwrap_or_default();
+        unsafe {
+            post_mac_incoming_call_notification(c_name.as_ptr(), c_num.as_ptr());
+        }
+    }
+}
+
+pub fn dismiss_mac_incoming_call() {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        cancel_mac_call_notifications();
+    }
 }
 
 pub fn clean_notification_text(raw: &str) -> String {
@@ -134,6 +204,15 @@ pub fn get_notification_list() -> Result<Vec<NotificationRecord>, String> {
 
 #[tauri::command]
 pub fn reply_notification(id: String, reply_text: String) -> Result<String, String> {
+    let msg = serde_json::json!({
+        "type": "command",
+        "action": "reply_notification",
+        "id": id,
+        "text": reply_text
+    });
+    if super::companion::send_companion_message(&msg) {
+        return Ok(format!("Reply dispatched via companion to {}: \"{}\"", id, reply_text));
+    }
     let escaped = reply_text.replace(' ', "%s");
     let _ = adb_command(&["shell", "input", "text", &escaped]).output();
     Ok(format!("Reply sent to notification {}: \"{}\"", id, reply_text))
@@ -160,14 +239,31 @@ pub fn send_sms(number: String, message: String) -> Result<String, String> {
 
 #[tauri::command]
 pub fn show_mac_system_notification(title: String, subtitle: String, message: String) -> Result<(), String> {
+    show_mac_system_notification_full(title, subtitle, message, false, String::new())
+}
+
+pub fn show_mac_system_notification_full(
+    title: String,
+    subtitle: String,
+    message: String,
+    has_reply: bool,
+    notif_id: String,
+) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         use std::ffi::CString;
         let c_title = CString::new(title).unwrap_or_default();
         let c_sub = CString::new(subtitle).unwrap_or_default();
         let c_msg = CString::new(message).unwrap_or_default();
+        let c_id = CString::new(notif_id).unwrap_or_default();
         unsafe {
-            post_mac_notification(c_title.as_ptr(), c_sub.as_ptr(), c_msg.as_ptr());
+            post_mac_notification_full(
+                c_title.as_ptr(),
+                c_sub.as_ptr(),
+                c_msg.as_ptr(),
+                if has_reply { 1 } else { 0 },
+                c_id.as_ptr(),
+            );
         }
         return Ok(());
     }

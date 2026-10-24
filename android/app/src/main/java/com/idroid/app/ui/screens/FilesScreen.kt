@@ -28,6 +28,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.idroid.app.ui.*
+import kotlinx.coroutines.launch
 
 /**
  * FilesScreen - Dedicated AirDrop & File Transfer Screen
@@ -39,6 +40,7 @@ fun FilesScreen(
 ) {
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
+    val scope = rememberCoroutineScope()
 
     val transferList = remember {
         mutableStateListOf(
@@ -53,8 +55,21 @@ fun FilesScreen(
         if (uri != null) {
             haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
             val name = uri.lastPathSegment?.substringAfterLast('/') ?: "Photo_${System.currentTimeMillis()}.jpg"
-            transferList.add(0, name to "Sending to Mac...")
-            Toast.makeText(context, "Photo dropped to Mac ~/Downloads/IdroidDrop", Toast.LENGTH_LONG).show()
+            transferList.add(0, name to "Streaming to Mac at Turbo Wi-Fi speed...")
+            scope.launch {
+                val prefs = context.getSharedPreferences("idroid_prefs", android.content.Context.MODE_PRIVATE)
+                val hostIp = prefs.getString("last_connected_ip", "127.0.0.1") ?: "127.0.0.1"
+                val res = com.idroid.app.service.TurboFileTransfer.sendFiles(context, hostIp, 53108, listOf(uri))
+                if (res.isSuccess) {
+                    transferList.removeAt(0)
+                    transferList.add(0, name to "Transferred to ~/Downloads/IdroidDrop")
+                    Toast.makeText(context, "✓ $name sent to Mac!", Toast.LENGTH_SHORT).show()
+                } else {
+                    transferList.removeAt(0)
+                    transferList.add(0, name to "Transfer failed")
+                    Toast.makeText(context, "Transfer failed: ${res.exceptionOrNull()?.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
         }
     }
 
@@ -64,8 +79,21 @@ fun FilesScreen(
         if (uri != null) {
             haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
             val name = uri.lastPathSegment?.substringAfterLast('/') ?: "File_${System.currentTimeMillis()}"
-            transferList.add(0, name to "Sending to Mac...")
-            Toast.makeText(context, "File dropped to Mac ~/Downloads/IdroidDrop", Toast.LENGTH_LONG).show()
+            transferList.add(0, name to "Streaming to Mac at Turbo Wi-Fi speed...")
+            scope.launch {
+                val prefs = context.getSharedPreferences("idroid_prefs", android.content.Context.MODE_PRIVATE)
+                val hostIp = prefs.getString("last_connected_ip", "127.0.0.1") ?: "127.0.0.1"
+                val res = com.idroid.app.service.TurboFileTransfer.sendFiles(context, hostIp, 53108, listOf(uri))
+                if (res.isSuccess) {
+                    transferList.removeAt(0)
+                    transferList.add(0, name to "Transferred to ~/Downloads/IdroidDrop")
+                    Toast.makeText(context, "✓ $name sent to Mac!", Toast.LENGTH_SHORT).show()
+                } else {
+                    transferList.removeAt(0)
+                    transferList.add(0, name to "Transfer failed")
+                    Toast.makeText(context, "Transfer failed: ${res.exceptionOrNull()?.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
         }
     }
 

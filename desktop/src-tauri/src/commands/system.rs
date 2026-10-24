@@ -1,10 +1,11 @@
 use std::process::Command;
 use std::sync::{LazyLock, Mutex};
-use super::types::{HostTelemetry, MacBluetoothStatus};
+use super::types::{HostTelemetry, MacBluetoothDevice, MacBluetoothStatus, MacWifiInfo};
 
 unsafe extern "C" {
     fn mac_show_osd(image_type: std::ffi::c_int, percent: std::ffi::c_int);
     fn mac_toggle_spotlight();
+    fn mac_is_location_services_enabled() -> std::ffi::c_int;
 }
 
 static MAC_BATTERY_CACHE: LazyLock<Mutex<Option<(std::time::Instant, (u8, bool))>>> = LazyLock::new(|| Mutex::new(None));
@@ -213,6 +214,186 @@ pub fn open_mac_bluetooth_settings() -> Result<String, String> {
 }
 
 #[tauri::command]
+pub fn get_mac_bluetooth_devices() -> Vec<MacBluetoothDevice> {
+    super::apps::ensure_helper_binaries();
+    let bin = if std::path::Path::new("/tmp/mac-bt-helper").exists() {
+        "/tmp/mac-bt-helper"
+    } else {
+        "bin/mac-bt-helper"
+    };
+
+    let output = Command::new(bin)
+        .arg("list")
+        .output();
+
+    if let Ok(out) = output {
+        if let Ok(devices) = serde_json::from_slice::<Vec<MacBluetoothDevice>>(&out.stdout) {
+            return devices;
+        }
+    }
+    Vec::new()
+}
+
+#[tauri::command]
+pub fn connect_mac_bluetooth_device(address: String) -> Result<String, String> {
+    super::apps::ensure_helper_binaries();
+    let bin = if std::path::Path::new("/tmp/mac-bt-helper").exists() {
+        "/tmp/mac-bt-helper"
+    } else {
+        "bin/mac-bt-helper"
+    };
+
+    let output = Command::new(bin)
+        .args(["connect", &address])
+        .output()
+        .map_err(|e| format!("Failed to execute helper: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&stdout) {
+        if val.get("success").and_then(|s| s.as_bool()).unwrap_or(false) {
+            let name = val.get("name").and_then(|n| n.as_str()).unwrap_or("Device");
+            return Ok(format!("Connected to {}", name));
+        } else {
+            let err = val.get("error").and_then(|e| e.as_str()).unwrap_or("Connection failed");
+            return Err(err.to_string());
+        }
+    }
+
+    if output.status.success() {
+        Ok("Connected".into())
+    } else {
+        Err("Failed to connect device".into())
+    }
+}
+
+#[tauri::command]
+pub fn disconnect_mac_bluetooth_device(address: String) -> Result<String, String> {
+    super::apps::ensure_helper_binaries();
+    let bin = if std::path::Path::new("/tmp/mac-bt-helper").exists() {
+        "/tmp/mac-bt-helper"
+    } else {
+        "bin/mac-bt-helper"
+    };
+
+    let output = Command::new(bin)
+        .args(["disconnect", &address])
+        .output()
+        .map_err(|e| format!("Failed to execute helper: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&stdout) {
+        if val.get("success").and_then(|s| s.as_bool()).unwrap_or(false) {
+            let name = val.get("name").and_then(|n| n.as_str()).unwrap_or("Device");
+            return Ok(format!("Disconnected from {}", name));
+        } else {
+            let err = val.get("error").and_then(|e| e.as_str()).unwrap_or("Disconnect failed");
+            return Err(err.to_string());
+        }
+    }
+
+    if output.status.success() {
+        Ok("Disconnected".into())
+    } else {
+        Err("Failed to disconnect device".into())
+    }
+}
+
+#[tauri::command]
+pub fn get_mac_wifi_info() -> MacWifiInfo {
+    // Find Wi-Fi interface dynamically or default to en0
+    let mut iface = "en0".to_string();
+    if let Ok(hw_out) = Command::new("/usr/sbin/networksetup")
+        .args(["-listallhardwareports"])
+        .output()
+    {
+        let hw_text = String::from_utf8_lossy(&hw_out.stdout);
+        let mut found_wifi = false;
+        for line in hw_text.lines() {
+            if line.contains("Hardware Port: Wi-Fi") || line.contains("Hardware Port: AirPort") {
+                found_wifi = true;
+                continue;
+            }
+            if found_wifi && line.starts_with("Device:") {
+                if let Some(dev) = line.split(':').nth(1) {
+                    let d = dev.trim();
+                    if !d.is_empty() {
+                        iface = d.to_string();
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    let power_out = Command::new("/usr/sbin/networksetup")
+        .args(["-getairportpower", &iface])
+        .output();
+    let mut power = true;
+    if let Ok(out) = power_out {
+        let text = String::from_utf8_lossy(&out.stdout);
+        if text.to_lowercase().contains(": off") {
+            power = false;
+        }
+    }
+
+    let mut ssid = String::new();
+    let net_out = Command::new("/usr/sbin/networksetup")
+        .args(["-getairportnetwork", &iface])
+        .output();
+    if let Ok(out) = net_out {
+        let text = String::from_utf8_lossy(&out.stdout);
+        if text.contains("Current Wi-Fi Network:") {
+            let parsed = text.replace("Current Wi-Fi Network:", "").trim().to_string();
+            if !parsed.is_empty() && !parsed.contains("not associated") {
+                ssid = parsed;
+            }
+        }
+    }
+
+    // Modern macOS fallback (networksetup -getairportnetwork can return 'not associated' in Sonoma/Sequoia)
+    if ssid.is_empty() {
+        if let Ok(out) = Command::new("/usr/sbin/ipconfig")
+            .args(["getsummary", &iface])
+            .output()
+        {
+            let text = String::from_utf8_lossy(&out.stdout);
+            for line in text.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("SSID :") {
+                    let s = trimmed.trim_start_matches("SSID :").trim();
+                    if !s.is_empty() && s != "<redacted>" {
+                        ssid = s.to_string();
+                        power = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    MacWifiInfo {
+        power,
+        ssid,
+        interface: iface,
+    }
+}
+
+#[tauri::command]
+pub fn set_mac_wifi_power(power: bool) -> Result<String, String> {
+    let state = if power { "on" } else { "off" };
+    let output = Command::new("/usr/sbin/networksetup")
+        .args(["-setairportpower", "en0", state])
+        .output()
+        .map_err(|e| format!("Failed to set Wi-Fi power: {}", e))?;
+
+    if output.status.success() {
+        Ok(format!("Wi-Fi turned {}", state))
+    } else {
+        Err("Failed to update Wi-Fi state".into())
+    }
+}
+
+#[tauri::command]
 pub fn get_host_telemetry() -> HostTelemetry {
     let name = get_mac_computer_name();
     let (battery, is_charging) = get_mac_battery();
@@ -295,64 +476,252 @@ except:
 }
 
 pub fn toggle_mac_play_pause_with_feedback() -> String {
-    let jxa = r#"
-(function() {
-    try {
-        if (Application("Music").running() && Application("Music").playerState() === "playing") return "playing";
-    } catch(e) {}
-    try {
-        if (Application("Spotify").running() && Application("Spotify").playerState() === "playing") return "playing";
-    } catch(e) {}
-    return "none";
-})()
-"#;
-    let out = Command::new("osascript").args(["-l", "JavaScript", "-e", jxa]).output();
-    let state = out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
-
-    let pmset_out = Command::new("pmset").args(["-g", "assertions"]).output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-        .unwrap_or_default();
-    let audio_active = pmset_out.to_lowercase().contains("coreaudiod") || (pmset_out.to_lowercase().contains("audio") && pmset_out.to_lowercase().contains("com.apple.audio"));
-
-    if state == "playing" || audio_active {
-        toggle_mac_play_pause();
-        "Toggled playback on Mac".to_string()
-    } else {
-        "Nothing is playing on Mac".to_string()
-    }
+    toggle_mac_play_pause();
+    "Toggled playback on Mac".to_string()
 }
 
 pub fn toggle_mac_play_pause() {
-    let script = r#"
-tell application "System Events"
-    set isMusicRunning to exists (processes where name is "Music")
-    set isSpotifyRunning to exists (processes where name is "Spotify")
-end tell
-if isSpotifyRunning then
-    tell application "Spotify" to playpause
-else if isMusicRunning then
-    tell application "Music" to playpause
-else
-    tell application "System Events" to key code 49
-end if
-"#;
-    let _ = Command::new("osascript").args(["-e", script]).spawn();
     execute_mac_media_key("play_pause");
 }
 
-pub fn execute_mac_media_key(key: &str) {
-    let binary_candidates = [
-        "/tmp/mac-media-key",
-        "/Users/ompandey/Projects/Idroid/desktop/src-tauri/bin/mac-media-key",
-        "bin/mac-media-key",
-        "desktop/src-tauri/bin/mac-media-key",
-    ];
-    for b in &binary_candidates {
-        if std::path::Path::new(b).exists() {
-            let _ = Command::new(b).arg(key).spawn();
-            return;
+unsafe extern "C" {
+    pub fn mac_media_remote_send(cmd: std::ffi::c_uint) -> std::ffi::c_int;
+    pub fn post_mac_hardware_media_key(key: std::ffi::c_int);
+}
+
+pub fn send_mac_media_remote(cmd: u32) -> bool {
+    unsafe {
+        mac_media_remote_send(cmd as std::ffi::c_uint) == 1
+    }
+}
+
+pub fn detect_active_media_target() -> String {
+    // 1. Check pmset -g assertions for which process is actively playing audio or holding a video wake lock
+    if let Ok(output) = Command::new("pmset").args(["-g", "assertions"]).output() {
+        let text = String::from_utf8_lossy(&output.stdout);
+        for line in text.lines() {
+            if line.contains("Playing audio") || line.contains("Video Wake Lock") {
+                if let Some(start) = line.find('(') {
+                    if let Some(end) = line[start + 1..].find(')') {
+                        let proc_name = &line[start + 1..start + 1 + end];
+                        if proc_name != "coreaudiod" && proc_name != "powerd" && proc_name != "caffeinate" {
+                            return proc_name.to_string();
+                        }
+                    }
+                }
+            }
         }
     }
+
+    // 2. Check frontmost application (if the user is actively viewing a browser or player)
+    if let Ok(output) = Command::new("osascript").args(["-e", "tell application \"System Events\" to name of first application process whose frontmost is true"]).output() {
+        let front = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let media_apps = [
+            "Brave Browser", "Google Chrome", "Safari", "Arc", "Microsoft Edge", "Firefox",
+            "Spotify", "Music", "VLC", "IINA", "QuickTime Player"
+        ];
+        if media_apps.contains(&front.as_str()) {
+            return front;
+        }
+    }
+
+    // 3. Check open browsers for YouTube or media tabs (ONLY if the browser is already running)
+    for browser in ["Brave Browser", "Google Chrome", "Safari", "Arc", "Microsoft Edge"] {
+        let is_running = Command::new("pgrep")
+            .args(["-f", browser])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !is_running {
+            continue;
+        }
+        let script = format!(
+            "try\ntell application \"{}\" to return (count of (tabs of windows whose URL contains \"youtube.com\" or URL contains \"music\" or URL contains \"soundcloud\"))\nend try",
+            browser
+        );
+        if let Ok(output) = Command::new("osascript").args(["-e", &script]).output() {
+            let count_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if let Ok(cnt) = count_str.parse::<i32>() {
+                if cnt > 0 {
+                    return browser.to_string();
+                }
+            }
+        }
+    }
+
+    // 4. Fallback to Spotify or Music ONLY if already running
+    for player in ["Spotify", "Music"] {
+        let is_running = Command::new("pgrep")
+            .args(["-f", player])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !is_running {
+            continue;
+        }
+        let script = format!("tell application \"System Events\" to return (count (every process whose name is \"{}\"))", player);
+        if let Ok(output) = Command::new("osascript").args(["-e", &script]).output() {
+            let count_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if let Ok(cnt) = count_str.parse::<i32>() {
+                if cnt > 0 {
+                    return player.to_string();
+                }
+            }
+        }
+    }
+
+    "generic".to_string()
+}
+
+pub fn execute_mac_media_key(key: &str) {
+    // 1. Dispatch real macOS Hardware Media Keys (NX_KEYTYPE_PLAY = 16, NEXT = 17, PREVIOUS = 18)
+    let hw_key = match key {
+        "play_pause" | "play" | "pause" => 16,
+        "next" => 17,
+        "prev" => 18,
+        _ => 0,
+    };
+    if hw_key > 0 {
+        unsafe {
+            post_mac_hardware_media_key(hw_key);
+        }
+    }
+
+    // 2. Dispatch macOS MediaRemote framework commands (2 = TogglePlayPause, 0 = Play, 1 = Pause, 4 = Next, 5 = Prev)
+    let mr_cmd = match key {
+        "play_pause" => 2,
+        "play" => 0,
+        "pause" => 1,
+        "next" => 4,
+        "prev" => 5,
+        _ => 2,
+    };
+    send_mac_media_remote(mr_cmd);
+
+    // 3. Detect and target active / open player
+    let target = detect_active_media_target();
+    println!("[Idroid Media] Dynamic media target: '{}' for command: '{}'", target, key);
+
+    match target.as_str() {
+        "Spotify" => {
+            let script = match key {
+                "play_pause" | "play" | "pause" => "tell application \"Spotify\" to playpause",
+                "next" => "tell application \"Spotify\" to next track",
+                "prev" => "tell application \"Spotify\" to previous track",
+                _ => "",
+            };
+            if !script.is_empty() {
+                let _ = Command::new("osascript").args(["-e", script]).spawn();
+            }
+        }
+        "Music" => {
+            let script = match key {
+                "play_pause" | "play" | "pause" => "tell application \"Music\" to playpause",
+                "next" => "tell application \"Music\" to next track",
+                "prev" => "tell application \"Music\" to previous track",
+                _ => "",
+            };
+            if !script.is_empty() {
+                let _ = Command::new("osascript").args(["-e", script]).spawn();
+            }
+        }
+        "VLC" | "IINA" | "QuickTime Player" => {
+            match key {
+                "play_pause" | "play" | "pause" => {
+                    let script = format!("tell application \"System Events\" to tell process \"{}\" to key code 49", target);
+                    let _ = Command::new("osascript").args(["-e", &script]).spawn();
+                }
+                "next" => {
+                    let script = format!("tell application \"System Events\" to tell process \"{}\" to key code 124 using command down", target);
+                    let _ = Command::new("osascript").args(["-e", &script]).spawn();
+                }
+                "prev" => {
+                    let script = format!("tell application \"System Events\" to tell process \"{}\" to key code 123 using command down", target);
+                    let _ = Command::new("osascript").args(["-e", &script]).spawn();
+                }
+                _ => {}
+            }
+        }
+        "Brave Browser" | "Google Chrome" | "Safari" | "Arc" | "Microsoft Edge" | "Firefox" => {
+            let keystroke_action = match key {
+                "play_pause" | "play" | "pause" => {
+                    r#"
+                    if u contains "music.youtube.com" then
+                        keystroke ";"
+                    else
+                        keystroke "k"
+                    end if
+                    "#
+                }
+                "next" => {
+                    r#"
+                    if u contains "music.youtube.com" then
+                        keystroke "k"
+                    else
+                        keystroke "N" using shift down
+                    end if
+                    "#
+                }
+                "prev" => {
+                    r#"
+                    if u contains "music.youtube.com" then
+                        keystroke "j"
+                    else
+                        keystroke "P" using shift down
+                    end if
+                    "#
+                }
+                _ => "",
+            };
+
+            if !keystroke_action.is_empty() {
+                let script = format!(
+                    r#"
+                    tell application "System Events"
+                        set frontProc to first process whose frontmost is true
+                        set frontName to name of frontProc
+                    end tell
+
+                    try
+                        tell application "{target}"
+                            repeat with w in windows
+                                set tIdx to 0
+                                repeat with t in tabs of w
+                                    set tIdx to tIdx + 1
+                                    set u to URL of t
+                                    if u contains "youtube.com" or u contains "music.youtube" or u contains "soundcloud.com" then
+                                        set active tab index of w to tIdx
+                                        set index of w to 1
+                                        activate
+                                        delay 0.05
+                                        tell application "System Events"
+                                            tell process "{target}"
+                                                {keystroke_action}
+                                            end tell
+                                        end tell
+                                        if frontName is not "{target}" then
+                                            tell application "System Events" to set frontmost of frontProc to true
+                                        end if
+                                        exit repeat
+                                    end if
+                                end repeat
+                            end repeat
+                        end tell
+                    end try
+                    "#
+                );
+                let _ = Command::new("osascript").args(["-e", &script]).spawn();
+            }
+        }
+        _ => {
+            // Generic fallback: send Space (49) to frontmost app if not handled above
+            if key == "play_pause" || key == "play" || key == "pause" {
+                let _ = Command::new("osascript").args(["-e", "tell application \"System Events\" to key code 49"]).spawn();
+            }
+        }
+    }
+
+    // Hardware volume and display adjustments
     match key {
         "vol_up" | "volume_up" => {
             let _ = Command::new("osascript")
@@ -379,21 +748,6 @@ pub fn execute_mac_media_key(key: &str) {
                 .args(["-e", "tell application \"System Events\" to key code 145"])
                 .spawn();
         }
-        "play_pause" => {
-            let _ = Command::new("osascript")
-                .args(["-e", "tell application \"System Events\" to key code 49"])
-                .spawn();
-        }
-        "next" => {
-            let _ = Command::new("osascript")
-                .args(["-e", "try\ntell application \"Music\" to next track\nend try\ntry\ntell application \"Spotify\" to next track\nend try"])
-                .spawn();
-        }
-        "prev" => {
-            let _ = Command::new("osascript")
-                .args(["-e", "try\ntell application \"Music\" to previous track\nend try\ntry\ntell application \"Spotify\" to previous track\nend try"])
-                .spawn();
-        }
         "mission_control" => {
             let _ = Command::new("open").args(["-a", "Mission Control"]).spawn();
         }
@@ -408,3 +762,39 @@ pub fn execute_mac_media_key(key: &str) {
         _ => {}
     }
 }
+
+
+#[tauri::command]
+pub fn get_mac_location_services_state() -> Result<bool, String> {
+    unsafe {
+        Ok(mac_is_location_services_enabled() != 0)
+    }
+}
+
+#[tauri::command]
+pub fn toggle_mac_location_services(enable: Option<bool>) -> Result<bool, String> {
+    let current = unsafe { mac_is_location_services_enabled() != 0 };
+    let target = enable.unwrap_or(!current);
+    let state_str = if target { "true" } else { "false" };
+    let action_name = if target { "enable" } else { "disable" };
+
+    // 1. Immediately open Privacy & Security -> Location Services in System Settings so the user sees the switch in the UI
+    let _ = Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_LocationServices")
+        .spawn();
+
+    // 2. Prompt Touch ID or Administrator Password prompt on Mac to write preference and reload locationd
+    let script = format!(
+        r#"do shell script "UUID=$(/usr/sbin/system_profiler SPHardwareDataType | awk '/Hardware UUID/{{print $NF}}'); defaults write /var/db/locationd/Library/Preferences/ByHost/com.apple.locationd LocationServicesEnabled -bool {state}; if [ -n \"$UUID\" ]; then defaults write /var/db/locationd/Library/Preferences/ByHost/com.apple.locationd.$UUID LocationServicesEnabled -bool {state}; fi; chown -R _locationd:_locationd /var/db/locationd 2>/dev/null || true; launchctl kickstart -k system/com.apple.locationd 2>/dev/null || true" with administrator privileges with prompt "Idroid requires your Touch ID or password to {action} macOS Location Services:""#,
+        state = state_str,
+        action = action_name
+    );
+
+    let output = Command::new("osascript").args(["-e", &script]).output();
+    let new_state = match output {
+        Ok(out) if out.status.success() => target,
+        _ => unsafe { mac_is_location_services_enabled() != 0 },
+    };
+    Ok(new_state)
+}
+

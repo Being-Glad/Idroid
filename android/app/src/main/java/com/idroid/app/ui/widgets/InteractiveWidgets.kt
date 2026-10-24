@@ -242,10 +242,12 @@ fun SplitControlPill(
             verticalAlignment = Alignment.CenterVertically
         ) {
             // Left Half: [-]
+            val leftHalfShape = RoundedCornerShape(topStart = 20.dp, bottomStart = 20.dp)
             Box(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxHeight()
+                    .clip(leftHalfShape)
                     .clickable {
                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                         onMinusClick()
@@ -295,10 +297,12 @@ fun SplitControlPill(
             }
 
             // Right Half: [+]
+            val rightHalfShape = RoundedCornerShape(topEnd = 20.dp, bottomEnd = 20.dp)
             Box(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxHeight()
+                    .clip(rightHalfShape)
                     .clickable {
                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                         onPlusClick()
@@ -362,14 +366,15 @@ fun MediaControllerIsland(
 
             // Play / Pause (Solar Orange Hero Button)
             Surface(
+                onClick = {
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    IdroidService.instance?.sendMediaKey("play_pause")
+                },
                 color = SolarOrange,
                 shape = CircleShape,
                 modifier = Modifier
                     .size(48.dp)
-                    .clickable {
-                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                        IdroidService.instance?.sendMediaKey("play_pause")
-                    }
+                    .clip(CircleShape)
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     Icon(Icons.Default.PlayArrow, contentDescription = "Play/Pause", tint = PureWhite, modifier = Modifier.size(26.dp))
@@ -584,7 +589,7 @@ fun ClipboardMiniWidget(
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Icon(
-                        Icons.Default.ContentPaste,
+                        Icons.Default.LaptopMac,
                         contentDescription = null,
                         tint = SolarOrange,
                         modifier = Modifier.size(18.dp)
@@ -598,14 +603,9 @@ fun ClipboardMiniWidget(
                     )
                 }
 
+                val copyShape = RoundedCornerShape(12.dp)
                 Surface(
-                    color = if (copiedState) EmeraldBeacon.copy(alpha = 0.2f) else SolarOrange.copy(alpha = 0.12f),
-                    shape = RoundedCornerShape(12.dp),
-                    border = androidx.compose.foundation.BorderStroke(
-                        1.dp,
-                        if (copiedState) EmeraldBeacon else SolarOrange.copy(alpha = 0.35f)
-                    ),
-                    modifier = Modifier.clickable {
+                    onClick = {
                         if (sharedClipboardText.isNotBlank()) {
                             val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                             cm.setPrimaryClip(ClipData.newPlainText("Idroid Mac Clipboard", sharedClipboardText))
@@ -613,7 +613,14 @@ fun ClipboardMiniWidget(
                             copiedState = true
                             Toast.makeText(context, "Copied to phone!", Toast.LENGTH_SHORT).show()
                         }
-                    }
+                    },
+                    color = if (copiedState) EmeraldBeacon.copy(alpha = 0.2f) else SolarOrange.copy(alpha = 0.12f),
+                    shape = copyShape,
+                    border = androidx.compose.foundation.BorderStroke(
+                        1.dp,
+                        if (copiedState) EmeraldBeacon else SolarOrange.copy(alpha = 0.35f)
+                    ),
+                    modifier = Modifier.clip(copyShape)
                 ) {
                     Row(
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),

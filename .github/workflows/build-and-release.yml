@@ -1,0 +1,143 @@
+name: Build & Release (macOS & Android)
+
+on:
+  push:
+    branches: [ main ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # -------------------------------------------------------------
+  # 1. Native macOS Desktop Host (DMG & App Bundle)
+  # -------------------------------------------------------------
+  build-macos:
+    name: Build macOS Desktop (DMG)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Setup Rust Stable with Universal macOS Targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - name: Cache Rust Dependencies
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - name: Install Frontend Dependencies
+        working-directory: desktop
+        run: npm ci
+
+      - name: Run Desktop Unit Tests
+        working-directory: desktop
+        run: npm test
+
+      - name: Build Web Application
+        working-directory: desktop
+        run: npm run build
+
+      - name: Build Universal macOS DMG (Intel x86_64 & Apple Silicon M-series)
+        working-directory: desktop
+        run: npx @tauri-apps/cli build --target universal-apple-darwin --bundles dmg,app
+
+      - name: Prepare macOS Artifacts
+        run: |
+          mkdir -p artifacts-macos
+          cp desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg artifacts-macos/ 2>/dev/null || cp desktop/src-tauri/target/release/bundle/dmg/*.dmg artifacts-macos/ 2>/dev/null || true
+          ls -lh artifacts-macos/
+
+      - name: Upload macOS Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: idroid-macos-dmg
+          path: artifacts-macos/*
+          if-no-files-found: error
+
+  # -------------------------------------------------------------
+  # 2. Native Android Companion App (APK)
+  # -------------------------------------------------------------
+  build-android:
+    name: Build Android Companion (APK)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Grant Execute Permission to Gradle Wrapper
+        run: chmod +x android/gradlew
+
+      - name: Run Android Unit Tests
+        working-directory: android
+        run: ./gradlew testDebugUnitTest
+
+      - name: Build Debug & Release APKs
+        working-directory: android
+        run: ./gradlew assembleDebug
+
+      - name: Prepare Android Artifacts
+        run: |
+          mkdir -p artifacts-android
+          cp android/app/build/outputs/apk/debug/app-debug.apk artifacts-android/Idroid-Companion.apk
+          ls -lh artifacts-android/
+
+      - name: Upload Android Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: idroid-android-apk
+          path: artifacts-android/*
+          if-no-files-found: error
+
+  # -------------------------------------------------------------
+  # 3. Create Automated GitHub Release (on Git Tag 'v*')
+  # -------------------------------------------------------------
+  create-release:
+    name: Publish GitHub Release
+    needs: [build-macos, build-android]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Download macOS Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: idroid-macos-dmg
+          path: release-assets
+
+      - name: Download Android Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: idroid-android-apk
+          path: release-assets
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true

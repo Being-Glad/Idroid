@@ -1,8 +1,8 @@
 /**
  * Idroid Core Protocol Specification
  * 
- * Defines the wire protocol between Desktop (macOS, Windows, Linux)
- * and Mobile (Android, iOS) companion applications.
+ * Defines the wire protocol between Desktop (macOS)
+ * and Mobile (Android) companion applications.
  * 
  * Principles:
  * - Simple JSON over local TCP/TLS sockets.
@@ -87,7 +87,7 @@ export type MessageType =
 export interface DeviceInfoPayload {
   deviceId: string;
   deviceName: string;
-  platform: "android" | "ios" | "macos" | "windows" | "linux";
+  platform: "android" | "macos";
   osVersion: string;
   appVersion: string;
   ipAddress: string;

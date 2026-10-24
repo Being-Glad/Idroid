@@ -3,14 +3,15 @@ use std::sync::{LazyLock, Mutex};
 use std::sync::atomic::{AtomicU16, Ordering};
 use super::types::{
     ActiveTransportInfo, DeviceTelemetry, DeviceWallpapers, MirrorWindowBounds,
-    PairingPayload, WirelessConnectionResult, ACTIVE_SERVER_PORT, COMPANION_SESSION,
+    PairingPayload, PhoneBluetoothDevice, PhoneBluetoothState, PhoneHotspotState,
+    PhoneWifiState, WirelessConnectionResult, ACTIVE_SERVER_PORT, COMPANION_SESSION,
     PREFERRED_TARGET,
 };
 use super::apps::{find_companion_icon_bytes, map_package_to_app};
 
-#[cfg(target_os = "macos")]
 unsafe extern "C" {
     fn find_scrcpy_window(x: *mut f64, y: *mut f64, w: *mut f64, h: *mut f64) -> i32;
+    fn kill(pid: i32, sig: i32) -> i32;
 }
 
 static PORT_COUNTER: AtomicU16 = AtomicU16::new(0);
@@ -241,6 +242,18 @@ pub fn get_device_telemetry() -> DeviceTelemetry {
                     bluetooth_status: session.bluetooth_status.clone(),
                     bluetooth_connected: session.bluetooth_connected,
                 };
+            }
+        }
+    }
+
+    // If no active TCP session exists yet, automatically probe and reverse ADB ports for any plugged-in USB phone
+    let adb = get_adb_path();
+    if let Ok(output) = Command::new(&adb).args(["devices"]).output() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let devices = parse_adb_devices_list(&stdout);
+        for (dev, status) in &devices {
+            if status == "device" && !dev.contains(':') {
+                ensure_usb_reverse_tunnels(dev);
             }
         }
     }
@@ -605,22 +618,19 @@ pub fn get_mirror_window_bounds() -> Option<MirrorWindowBounds> {
         }
     }
 
-    #[cfg(target_os = "macos")]
-    {
-        let mut x = 0.0;
-        let mut y = 0.0;
-        let mut w = 0.0;
-        let mut h = 0.0;
-        unsafe {
-            if find_scrcpy_window(&mut x, &mut y, &mut w, &mut h) == 1 {
-                return Some(MirrorWindowBounds {
-                    title: "Mirror".to_string(),
-                    x,
-                    y,
-                    w,
-                    h,
-                });
-            }
+    let mut x = 0.0;
+    let mut y = 0.0;
+    let mut w = 0.0;
+    let mut h = 0.0;
+    unsafe {
+        if find_scrcpy_window(&mut x, &mut y, &mut w, &mut h) == 1 {
+            return Some(MirrorWindowBounds {
+                title: "Mirror".to_string(),
+                x,
+                y,
+                w,
+                h,
+            });
         }
     }
     None
@@ -637,7 +647,10 @@ pub fn sync_mirror_dock(app: tauri::AppHandle, visible: bool) -> Result<(), Stri
         return Ok(());
     }
 
-    if let Ok(guard) = MIRROR_PIDS.lock() {
+    if let Ok(mut guard) = MIRROR_PIDS.lock() {
+        guard.retain(|&pid| {
+            unsafe { kill(pid as i32, 0) == 0 }
+        });
         if guard.is_empty() {
             if let Some(win) = app.get_webview_window("mirror-dock") {
                 let _ = win.hide();
@@ -707,8 +720,22 @@ pub fn send_phone_key(key: String) -> Result<String, String> {
         let _ = adb_command(&["shell", "am", "start", "-a", "android.settings.SETTINGS"]).output();
         return Ok("Settings opened".into());
     } else if key == "bluetooth_settings" || key == "phone_bluetooth" {
-        let _ = adb_command(&["shell", "am", "start", "-a", "android.settings.BLUETOOTH_SETTINGS"]).output();
-        return Ok("Bluetooth settings opened".into());
+        let _ = adb_command(&["shell", "svc", "bluetooth", "enable"]).output();
+        return Ok("Bluetooth enabled".into());
+    } else if key == "toggle_location" || key == "phone_location" {
+        let current = adb_command(&["shell", "cmd", "location", "is-location-enabled"]).output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains("true"))
+            .unwrap_or(false);
+        let next = if current { "false" } else { "true" };
+        let _ = adb_command(&["shell", "cmd", "location", "set-location-enabled", next]).output();
+        return Ok(format!("Location set to {}", next));
+    } else if key == "toggle_wifi" || key == "phone_wifi" {
+        let current = adb_command(&["shell", "cmd", "wifi", "status"]).output()
+            .map(|o| !String::from_utf8_lossy(&o.stdout).contains("disabled"))
+            .unwrap_or(true);
+        let next = if current { "disabled" } else { "enabled" };
+        let _ = adb_command(&["shell", "cmd", "wifi", "set-wifi-enabled", next]).output();
+        return Ok(format!("Wi-Fi set to {}", next));
     } else if key == "rotate" {
         let _ = adb_command(&["shell", "content", "insert", "--uri", "content://settings/system", "--bind", "name:s:accelerometer_rotation", "--bind", "value:i:1"]).output();
         return Ok("Auto-rotate enabled".into());
@@ -965,8 +992,16 @@ pub fn get_pairing_qr_payload() -> PairingPayload {
             .map(|d| d.as_millis())
             .unwrap_or(0)
     );
+    super::security::set_active_pairing_token(&token);
 
     let port = ACTIVE_SERVER_PORT.lock().map(|p| *p).unwrap_or(53100);
+
+    let wifi_info = super::system::get_mac_wifi_info();
+    let ssid = if !wifi_info.ssid.is_empty() && wifi_info.ssid != "<redacted>" {
+        Some(wifi_info.ssid)
+    } else {
+        None
+    };
 
     PairingPayload {
         name: if mac_name.is_empty() { "MacBook Pro".into() } else { mac_name },
@@ -974,18 +1009,57 @@ pub fn get_pairing_qr_payload() -> PairingPayload {
         port,
         token,
         protocol: "idroid-v1".into(),
+        ssid,
     }
 }
 
 pub fn get_mac_local_ip() -> Option<String> {
-    for iface in &["en0", "en1", "en2"] {
+    // 1. Try finding the active interface used by the default route
+    if let Ok(output) = Command::new("route").args(["-n", "get", "default"]).output() {
+        let route_str = String::from_utf8_lossy(&output.stdout);
+        for line in route_str.lines() {
+            if line.contains("interface:") {
+                let parts: Vec<&str> = line.split(':').collect();
+                if parts.len() >= 2 {
+                    let iface = parts[1].trim();
+                    if let Ok(ip_out) = Command::new("ipconfig").args(["getifaddr", iface]).output() {
+                        let ip = String::from_utf8_lossy(&ip_out.stdout).trim().to_string();
+                        if !ip.is_empty() && ip.contains('.') && ip != "127.0.0.1" {
+                            return Some(ip);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Iterate standard macOS Wi-Fi, Ethernet, and Hotspot bridge interfaces
+    for iface in &["en0", "en1", "en2", "en3", "en4", "en5", "bridge100", "ap1"] {
         if let Ok(output) = Command::new("ipconfig").args(["getifaddr", iface]).output() {
             let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !ip.is_empty() && ip.contains('.') {
+            if !ip.is_empty() && ip.contains('.') && ip != "127.0.0.1" {
                 return Some(ip);
             }
         }
     }
+
+    // 3. Fallback: Parse ifconfig for active non-loopback IPv4 addresses
+    if let Ok(output) = Command::new("ifconfig").output() {
+        let text = String::from_utf8_lossy(&output.stdout);
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("inet ") {
+                let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+                if tokens.len() >= 2 {
+                    let ip = tokens[1];
+                    if ip != "127.0.0.1" && (ip.starts_with("192.168.") || ip.starts_with("10.") || ip.starts_with("172.")) {
+                        return Some(ip.to_string());
+                    }
+                }
+            }
+        }
+    }
+
     None
 }
 
@@ -1027,3 +1101,163 @@ pub fn install_companion_apk() -> Result<String, String> {
 
     Err("Companion APK not found. Build the Android app or ensure Idroid-Companion.apk is present.".into())
 }
+
+#[tauri::command]
+pub fn get_phone_bluetooth_state() -> Result<PhoneBluetoothState, String> {
+    let output = adb_command(&["shell", "dumpsys", "bluetooth_manager"]).output()
+        .map_err(|e| e.to_string())?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let enabled = text.lines().any(|l| {
+        let t = l.trim();
+        t.starts_with("enabled: true") || t.starts_with("mEnable:true")
+    });
+
+    let mut devices = Vec::new();
+    let mut in_db = false;
+    let mut in_bonded = false;
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("Devices in DB:") {
+            in_db = true;
+            in_bonded = false;
+            continue;
+        } else if trimmed.starts_with("Bonded devices:") {
+            in_bonded = true;
+            in_db = false;
+            continue;
+        } else if trimmed.starts_with("Other devices:") || trimmed.starts_with("BluetoothActiveDeviceManager") {
+            in_db = false;
+            in_bonded = false;
+        }
+
+        if in_db && trimmed.contains('|') {
+            let parts: Vec<&str> = trimmed.split('|').map(|s| s.trim()).collect();
+            if parts.len() >= 2 {
+                let addr = parts[0].to_string();
+                let name = parts[1].to_string();
+                if !name.is_empty() && name != "null" && !devices.iter().any(|d: &PhoneBluetoothDevice| d.name == name) {
+                    devices.push(PhoneBluetoothDevice {
+                        name,
+                        address: addr,
+                        connected: false,
+                        bonded: true,
+                    });
+                }
+            }
+        } else if in_bonded && trimmed.contains("=>") {
+            let parts: Vec<&str> = trimmed.split(']').collect();
+            if let Some(last) = parts.last() {
+                let name = last.trim();
+                if !name.is_empty() && name != "null" && !devices.iter().any(|d: &PhoneBluetoothDevice| d.name == name) {
+                    devices.push(PhoneBluetoothDevice {
+                        name: name.to_string(),
+                        address: "".to_string(),
+                        connected: false,
+                        bonded: true,
+                    });
+                }
+            }
+        }
+    }
+
+    let connected_device = devices.first().map(|d| d.name.clone());
+
+    Ok(PhoneBluetoothState {
+        enabled,
+        connected_device,
+        devices,
+    })
+}
+
+#[tauri::command]
+pub fn toggle_phone_bluetooth(enable: bool) -> Result<bool, String> {
+    let state = if enable { "enable" } else { "disable" };
+    let _ = adb_command(&["shell", "svc", "bluetooth", state]).output();
+    Ok(enable)
+}
+
+#[tauri::command]
+pub fn get_phone_wifi_state() -> Result<PhoneWifiState, String> {
+    let output = adb_command(&["shell", "dumpsys", "wifi"]).output()
+        .map_err(|e| e.to_string())?;
+    let text = String::from_utf8_lossy(&output.stdout);
+
+    let status_out = adb_command(&["shell", "cmd", "wifi", "status"]).output();
+    let status_text = status_out.map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+    let enabled = !status_text.contains("Wifi is disabled");
+
+    let mut ssid: Option<String> = None;
+    let mut ip: Option<String> = None;
+    let mut link_speed: Option<String> = None;
+
+    for line in text.lines() {
+        if line.contains("mWifiInfo") && line.contains("SSID:") {
+            if let Some(part) = line.split("SSID: \"").nth(1) {
+                if let Some(s) = part.split('"').next() {
+                    ssid = Some(s.to_string());
+                }
+            }
+            if let Some(part) = line.split("IP: /").nth(1) {
+                if let Some(i) = part.split(',').next() {
+                    ip = Some(i.to_string());
+                }
+            }
+            if let Some(part) = line.split("Link speed: ").nth(1) {
+                if let Some(ls) = part.split(',').next() {
+                    link_speed = Some(ls.to_string());
+                }
+            }
+            break;
+        }
+    }
+
+    Ok(PhoneWifiState {
+        enabled,
+        ssid,
+        ip,
+        link_speed,
+    })
+}
+
+#[tauri::command]
+pub fn toggle_phone_wifi(enable: bool) -> Result<bool, String> {
+    let state = if enable { "enabled" } else { "disabled" };
+    let _ = adb_command(&["shell", "cmd", "wifi", "set-wifi-enabled", state]).output();
+    Ok(enable)
+}
+
+#[tauri::command]
+pub fn get_phone_location_state() -> Result<bool, String> {
+    let output = adb_command(&["shell", "cmd", "location", "is-location-enabled"]).output()
+        .map_err(|e| e.to_string())?;
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_lowercase();
+    Ok(text.contains("true"))
+}
+
+#[tauri::command]
+pub fn toggle_phone_location(enable: bool) -> Result<bool, String> {
+    let state = if enable { "true" } else { "false" };
+    let _ = adb_command(&["shell", "cmd", "location", "set-location-enabled", state]).output();
+    Ok(enable)
+}
+
+#[tauri::command]
+pub fn get_phone_hotspot_state() -> Result<PhoneHotspotState, String> {
+    let output = adb_command(&["shell", "ip", "addr", "show", "swlan0"]).output();
+    let text = output.map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+    let enabled = text.contains("state UP");
+
+    let ip = if enabled && text.contains("inet ") {
+        text.split("inet ").nth(1).and_then(|s| s.split('/').next()).map(|s| s.to_string())
+    } else {
+        None
+    };
+
+    Ok(PhoneHotspotState {
+        enabled,
+        ip,
+        client_count: if enabled { 1 } else { 0 },
+    })
+}
+

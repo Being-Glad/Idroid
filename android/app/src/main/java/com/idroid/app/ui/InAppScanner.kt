@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
+import com.idroid.app.service.CompanionBridge
 import android.util.Log
 import android.view.ViewGroup
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -267,9 +268,9 @@ fun CameraPreviewWithReticle(
                             Brush.horizontalGradient(
                                 listOf(
                                     Color.Transparent,
-                                    SolarOrange,
-                                    Color(0xFFFF9E66),
-                                    SolarOrange,
+                                    FinderBlueBright,
+                                    Color(0xFF7DD3FC),
+                                    FinderBlueBright,
                                     Color.Transparent
                                 )
                             )
@@ -344,6 +345,18 @@ fun parsePairingPayload(rawText: String): Pair<String, Int>? {
             val ip = uri.getQueryParameter("ip")
             val portStr = uri.getQueryParameter("port")
             val port = portStr?.toIntOrNull() ?: 53100
+            val ssid = uri.getQueryParameter("ssid")
+            val name = uri.getQueryParameter("name")
+            val token = uri.getQueryParameter("token")
+            if (!ssid.isNullOrBlank()) {
+                CompanionBridge.targetMacSsid.value = ssid
+            }
+            if (!name.isNullOrBlank()) {
+                CompanionBridge.macName.value = name
+            }
+            if (!token.isNullOrBlank()) {
+                CompanionBridge.pairingToken.value = token
+            }
             if (!ip.isNullOrBlank()) {
                 return Pair(ip, port)
             }
@@ -371,4 +384,98 @@ fun vibrateDevice(context: Context) {
             vibrator?.vibrate(70)
         }
     } catch (_: Exception) {}
+}
+
+@kotlin.OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun QrScannerBottomSheet(
+    onDismiss: () -> Unit,
+    onQrCodeDetected: (String, Int) -> Unit
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = ObsidianSurface,
+        scrimColor = ObsidianVoid.copy(alpha = 0.85f),
+        dragHandle = {
+            Box(
+                modifier = Modifier
+                    .padding(vertical = 12.dp)
+                    .width(42.dp)
+                    .height(4.5.dp)
+                    .clip(CircleShape)
+                    .background(ObsidianBorder)
+            )
+        }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 6.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Icon(
+                        Icons.Default.QrCodeScanner,
+                        contentDescription = null,
+                        tint = SolarOrange,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Text(
+                        text = "Scan Mac Screen QR",
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = InterFontFamily,
+                        color = PureWhite
+                    )
+                }
+
+                IconButton(
+                    onClick = onDismiss,
+                    modifier = Modifier
+                        .size(32.dp)
+                        .clip(CircleShape)
+                        .background(ObsidianSurfaceVariant)
+                ) {
+                    Icon(
+                        Icons.Default.Close,
+                        contentDescription = "Close",
+                        tint = TextSecondary,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
+
+            Text(
+                text = "Hold phone camera up to the QR code on your Mac screen",
+                fontSize = 12.5.sp,
+                fontFamily = InterFontFamily,
+                color = TextSecondary,
+                textAlign = TextAlign.Center
+            )
+
+            InAppQrScanner(
+                onQrCodeDetected = { ip, port ->
+                    onQrCodeDetected(ip, port)
+                    onDismiss()
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(300.dp)
+            )
+
+            Spacer(Modifier.navigationBarsPadding().height(24.dp))
+        }
+    }
 }

@@ -26,6 +26,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.idroid.app.network.DiagnosticAction
+import com.idroid.app.network.DiagnosticType
+import com.idroid.app.network.NetworkDiagnostics
 import com.idroid.app.service.CompanionBridge
 import com.idroid.app.ui.*
 
@@ -55,6 +58,76 @@ fun IdroidDoctorModal(
     val issues = remember {
         listOf(
             DoctorIssueItem(
+                id = "wifi_mismatch",
+                title = "Scanning but not connecting: Same Wi-Fi vs Personal Hotspot?",
+                summary = "Your phone and Mac must be on the exact same Wi-Fi network (or Personal Hotspot) for wireless link.",
+                category = "Connection",
+                icon = Icons.Default.WifiFind,
+                badge = "Top UX Guide"
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "For wireless discovery and instant pairing, your phone and Mac must be on the same local network. If your phone is on Cellular Mobile Data (4G/5G) or a different Wi-Fi network than your Mac, they cannot reach each other.",
+                        fontSize = 12.5.sp,
+                        fontFamily = InterFontFamily,
+                        color = PureWhite.copy(alpha = 0.9f),
+                        lineHeight = 18.sp
+                    )
+                    Surface(
+                        color = SolarOrange.copy(alpha = 0.12f),
+                        shape = RoundedCornerShape(12.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, SolarOrange.copy(alpha = 0.35f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Icon(Icons.Default.Tune, contentDescription = null, tint = SolarOrange, modifier = Modifier.size(15.dp))
+                                Text(
+                                    text = "Connection Best Practices:",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = SolarOrange,
+                                    fontFamily = InterFontFamily
+                                )
+                            }
+                            Text(
+                                text = "1. Same Wi-Fi: Connect both phone & Mac to the exact same Wi-Fi name (e.g. your home router).\n2. Personal Hotspot: Turn on Personal Hotspot on this phone and connect Mac Wi-Fi to it (1ms ultra-low latency & bypasses router blocking).\n3. USB Cable: Plug in USB-C cable for instant zero-latency link with phone charging.",
+                                fontSize = 12.sp,
+                                fontFamily = InterFontFamily,
+                                color = PureWhite,
+                                lineHeight = 17.sp
+                            )
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = { PlatformIntentLauncher.openWifiSettings(context) },
+                            colors = ButtonDefaults.buttonColors(containerColor = SolarOrange),
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.weight(1f).height(38.dp)
+                        ) {
+                            Icon(Icons.Default.Wifi, contentDescription = null, modifier = Modifier.size(15.dp), tint = PureWhite)
+                            Spacer(Modifier.width(6.dp))
+                            Text("Wi-Fi Settings", fontSize = 11.5.sp, fontWeight = FontWeight.Bold, fontFamily = InterFontFamily)
+                        }
+                        Button(
+                            onClick = { PlatformIntentLauncher.openHotspotSettings(context) },
+                            colors = ButtonDefaults.buttonColors(containerColor = ObsidianSurfaceVariant),
+                            shape = RoundedCornerShape(10.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, ObsidianBorder),
+                            modifier = Modifier.weight(1f).height(38.dp)
+                        ) {
+                            Icon(Icons.Default.WifiTethering, contentDescription = null, modifier = Modifier.size(15.dp), tint = PureWhite)
+                            Spacer(Modifier.width(6.dp))
+                            Text("Personal Hotspot", fontSize = 11.5.sp, fontWeight = FontWeight.Bold, fontFamily = InterFontFamily)
+                        }
+                    }
+                }
+            },
+            DoctorIssueItem(
                 id = "hotspot_vs_wifi",
                 title = "Why is Personal Hotspot faster & smoother than Home Wi-Fi?",
                 summary = "Tested direct peer-to-peer links offer 1ms response time and silky 60 FPS without router interference.",
@@ -78,7 +151,7 @@ fun IdroidDoctorModal(
                     ) {
                         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Text(
-                                text = "🏆 Personal Hotspot Advantages:",
+                                text = "Personal Hotspot Advantages:",
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = SolarOrange,
@@ -94,21 +167,12 @@ fun IdroidDoctorModal(
                         }
                     }
                     Button(
-                        onClick = {
-                            try {
-                                val intent = Intent(Intent.ACTION_MAIN).apply {
-                                    setClassName("com.android.settings", "com.android.settings.TetherSettings")
-                                }
-                                context.startActivity(intent)
-                            } catch (_: Exception) {
-                                context.startActivity(Intent(Settings.ACTION_WIRELESS_SETTINGS))
-                            }
-                        },
+                        onClick = { PlatformIntentLauncher.openHotspotSettings(context) },
                         colors = ButtonDefaults.buttonColors(containerColor = SolarOrange),
                         shape = RoundedCornerShape(10.dp),
                         modifier = Modifier.fillMaxWidth().height(40.dp)
                     ) {
-                        Icon(Icons.Default.WifiTethering, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Icon(Icons.Default.WifiTethering, contentDescription = null, modifier = Modifier.size(16.dp), tint = PureWhite)
                         Spacer(Modifier.width(8.dp))
                         Text("Open Mobile Hotspot Settings", fontFamily = InterFontFamily, fontWeight = FontWeight.Bold, fontSize = 12.5.sp)
                     }
@@ -412,11 +476,43 @@ fun IdroidDoctorModal(
                 }
             }
 
-            // Live Diagnostics Card
+            // Live Dynamic Diagnostics Card
+            val currentSsid = CompanionBridge.targetMacSsid.value ?: CompanionBridge.macWifiSsid.value
+            val liveReport = remember(connError, targetIp, isConnected, currentSsid) {
+                NetworkDiagnostics.diagnose(
+                    context = context,
+                    targetIp = targetIp.ifBlank { "192.168.1.10" },
+                    targetPort = CompanionBridge.lastTargetPort.value,
+                    targetSsid = currentSsid,
+                    rawError = connError,
+                    isConnected = isConnected
+                )
+            }
+
+            val badgeColor = when (liveReport.type) {
+                DiagnosticType.CONNECTED -> EmeraldBeacon
+                DiagnosticType.CELLULAR_DATA_ONLY, DiagnosticType.DIFFERENT_WIFI_NETWORK -> SolarOrange
+                DiagnosticType.ROUTER_AP_ISOLATION -> SolarOrange
+                DiagnosticType.MAC_APP_NOT_RUNNING -> SolarOrange
+                DiagnosticType.SECURITY_AUTH_REQUIRED -> SolarOrange
+                DiagnosticType.USB_DISCONNECTED -> TextSecondary
+                DiagnosticType.GENERIC_ERROR -> CrimsonDanger
+            }
+            val badgeText = when (liveReport.type) {
+                DiagnosticType.CONNECTED -> "Active Link"
+                DiagnosticType.CELLULAR_DATA_ONLY -> "Mobile Data"
+                DiagnosticType.DIFFERENT_WIFI_NETWORK -> "Different Wi-Fi"
+                DiagnosticType.ROUTER_AP_ISOLATION -> "Router AP Isolation"
+                DiagnosticType.MAC_APP_NOT_RUNNING -> "Mac App Closed"
+                DiagnosticType.SECURITY_AUTH_REQUIRED -> "Device Authorization Required"
+                DiagnosticType.USB_DISCONNECTED -> "USB Unplugged"
+                DiagnosticType.GENERIC_ERROR -> "Needs Attention"
+            }
+
             Surface(
                 color = ObsidianVoid,
                 shape = RoundedCornerShape(16.dp),
-                border = androidx.compose.foundation.BorderStroke(1.dp, ObsidianBorder),
+                border = androidx.compose.foundation.BorderStroke(1.dp, badgeColor.copy(alpha = 0.35f)),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(
@@ -436,18 +532,15 @@ fun IdroidDoctorModal(
                             color = PureWhite
                         )
                         Surface(
-                            color = if (isConnected) EmeraldBeacon.copy(alpha = 0.15f) else SolarOrange.copy(alpha = 0.15f),
+                            color = badgeColor.copy(alpha = 0.15f),
                             shape = RoundedCornerShape(8.dp),
-                            border = androidx.compose.foundation.BorderStroke(
-                                1.dp,
-                                if (isConnected) EmeraldBeacon.copy(alpha = 0.4f) else SolarOrange.copy(alpha = 0.4f)
-                            )
+                            border = androidx.compose.foundation.BorderStroke(1.dp, badgeColor.copy(alpha = 0.4f))
                         ) {
                             Text(
-                                text = if (isConnected) "Active Link" else if (connError != null) "Router Blocked" else "Ready to Pair",
+                                text = badgeText,
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = if (isConnected) EmeraldBeacon else SolarOrange,
+                                color = badgeColor,
                                 fontFamily = InterFontFamily,
                                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                             )
@@ -458,32 +551,116 @@ fun IdroidDoctorModal(
 
                     // Diagnosis details
                     if (isConnected) {
-                        Text(
-                            text = "🟢 Devices connected smoothly. Latency < 4ms with continuous telemetry sync.",
-                            fontSize = 12.sp,
-                            fontFamily = InterFontFamily,
-                            color = EmeraldBeacon
-                        )
-                    } else if (connError != null) {
-                        Text(
-                            text = "🟡 Router issue detected: Your home Wi-Fi router isn't allowing direct links between devices (AP Isolation).",
-                            fontSize = 12.sp,
-                            fontFamily = InterFontFamily,
-                            color = SolarOrange
-                        )
-                        Text(
-                            text = "👉 Recommended Solution: Turn on Personal Hotspot on this phone and connect your Mac to it for an instant direct link.",
-                            fontSize = 11.5.sp,
-                            fontFamily = InterFontFamily,
-                            color = PureWhite.copy(alpha = 0.9f)
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(8.dp)
+                                    .clip(CircleShape)
+                                    .background(EmeraldBeacon)
+                            )
+                            Text(
+                                text = "All systems operational. Latency < 4ms with continuous telemetry sync.",
+                                fontSize = 12.sp,
+                                fontFamily = InterFontFamily,
+                                color = EmeraldBeacon
+                            )
+                        }
                     } else {
-                        Text(
-                            text = "Ready to pair with Mac at $targetIp. Point camera at Mac QR code or tap Reconnect.",
-                            fontSize = 12.sp,
-                            fontFamily = InterFontFamily,
-                            color = TextSecondary
-                        )
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                text = liveReport.headline,
+                                fontSize = 13.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = InterFontFamily,
+                                color = badgeColor
+                            )
+                            Text(
+                                text = liveReport.explanation,
+                                fontSize = 12.sp,
+                                fontFamily = InterFontFamily,
+                                color = PureWhite.copy(alpha = 0.9f),
+                                lineHeight = 16.sp
+                            )
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.TipsAndUpdates,
+                                    contentDescription = null,
+                                    tint = SolarOrange,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Text(
+                                    text = liveReport.actionPrompt,
+                                    fontSize = 11.5.sp,
+                                    fontFamily = InterFontFamily,
+                                    color = SolarOrange,
+                                    lineHeight = 15.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+
+                            // Network state readout
+                            Surface(
+                                color = ObsidianSurfaceVariant.copy(alpha = 0.5f),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    FluidPrivacyMask(
+                                        rawText = liveReport.phoneIp.ifBlank { "0.0.0.0" },
+                                        prefix = "Phone (${if (liveReport.phoneIsWifi) "Wi-Fi" else if (liveReport.phoneIsCellular) "Cellular" else "Offline"}):",
+                                        fontSize = 10.sp
+                                    )
+                                    FluidPrivacyMask(
+                                        rawText = liveReport.targetIp,
+                                        prefix = "Mac:",
+                                        fontSize = 10.sp
+                                    )
+                                }
+                            }
+
+                            // Professional OEM-Resilient Action Deck
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                if (liveReport.type == DiagnosticType.CELLULAR_DATA_ONLY || liveReport.type == DiagnosticType.DIFFERENT_WIFI_NETWORK) {
+                                    Button(
+                                        onClick = { PlatformIntentLauncher.openWifiSettings(context) },
+                                        colors = ButtonDefaults.buttonColors(containerColor = SolarOrange),
+                                        shape = RoundedCornerShape(10.dp),
+                                        modifier = Modifier.weight(1f).height(36.dp)
+                                    ) {
+                                        Icon(Icons.Default.Wifi, contentDescription = null, modifier = Modifier.size(14.dp), tint = PureWhite)
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("Wi-Fi Settings", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = PureWhite)
+                                    }
+                                }
+
+                                Button(
+                                    onClick = { PlatformIntentLauncher.openHotspotSettings(context) },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = if (liveReport.type == DiagnosticType.ROUTER_AP_ISOLATION) SolarOrange else ObsidianSurfaceVariant
+                                    ),
+                                    shape = RoundedCornerShape(10.dp),
+                                    border = if (liveReport.type == DiagnosticType.ROUTER_AP_ISOLATION) null else androidx.compose.foundation.BorderStroke(1.dp, ObsidianBorder),
+                                    modifier = Modifier.weight(1f).height(36.dp)
+                                ) {
+                                    Icon(Icons.Default.WifiTethering, contentDescription = null, modifier = Modifier.size(14.dp), tint = PureWhite)
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("Personal Hotspot", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = PureWhite)
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -527,14 +704,16 @@ fun IdroidDoctorModal(
             ) {
                 categories.forEach { cat ->
                     val isSelected = selectedCategory == cat
+                    val tabShape = RoundedCornerShape(20.dp)
                     Surface(
+                        onClick = { selectedCategory = cat },
                         color = if (isSelected) SolarOrange else ObsidianVoid,
-                        shape = RoundedCornerShape(20.dp),
+                        shape = tabShape,
                         border = androidx.compose.foundation.BorderStroke(
                             1.dp,
                             if (isSelected) SolarOrange else ObsidianBorder
                         ),
-                        modifier = Modifier.clickable { selectedCategory = cat }
+                        modifier = Modifier.clip(tabShape)
                     ) {
                         Text(
                             text = cat,
@@ -572,18 +751,20 @@ fun IdroidDoctorModal(
             filteredIssues.forEach { issue ->
                 val isExpanded = expandedIssueId == issue.id
 
+                val issueShape = RoundedCornerShape(14.dp)
                 Surface(
+                    onClick = {
+                        expandedIssueId = if (isExpanded) null else issue.id
+                    },
                     color = ObsidianVoid,
-                    shape = RoundedCornerShape(14.dp),
+                    shape = issueShape,
                     border = androidx.compose.foundation.BorderStroke(
                         1.dp,
                         if (isExpanded) SolarOrange.copy(alpha = 0.5f) else ObsidianBorder
                     ),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable {
-                            expandedIssueId = if (isExpanded) null else issue.id
-                        }
+                        .clip(issueShape)
                 ) {
                     Column(
                         modifier = Modifier.padding(14.dp),

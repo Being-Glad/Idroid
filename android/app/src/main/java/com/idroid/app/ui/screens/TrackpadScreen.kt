@@ -14,14 +14,17 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import com.idroid.app.ui.widgets.ControlCenterReelsCard
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -259,13 +262,13 @@ fun TrackpadScreen(
                     )
                 }
 
-                // Scroll Rail on Right Edge
+                // Scroll & Reels Rail on Right Edge
                 Box(
                     modifier = Modifier
                         .align(Alignment.CenterEnd)
-                        .width(48.dp)
+                        .width(52.dp)
                         .fillMaxHeight()
-                        .background(Color.White.copy(alpha = 0.03f))
+                        .background(Color.White.copy(alpha = 0.035f))
                         .pointerInput(Unit) {
                             detectDragGestures { change, dragAmount ->
                                 change.consume()
@@ -276,22 +279,72 @@ fun TrackpadScreen(
                     contentAlignment = Alignment.Center
                 ) {
                     Column(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .padding(vertical = 10.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                        verticalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Icon(
-                            Icons.Default.SwapVert,
-                            contentDescription = "Scroll Rail",
-                            tint = SolarOrange.copy(alpha = 0.7f),
-                            modifier = Modifier.size(22.dp)
-                        )
-                        Text(
-                            text = "SCROLL",
-                            fontSize = 8.5.sp,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = InterFontFamily,
-                            color = SolarOrange.copy(alpha = 0.6f)
-                        )
+                        // Quick Prev Reel Button (Up)
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .background(ObsidianSurfaceVariant.copy(alpha = 0.9f))
+                                .border(1.dp, ObsidianBorder, CircleShape)
+                                .clickable {
+                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    IdroidService.instance?.sendKeyPress("up")
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                Icons.Default.KeyboardArrowUp,
+                                contentDescription = "Prev Reel",
+                                tint = PureWhite,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+
+                        // Middle indicator
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.SwapVert,
+                                contentDescription = "Scroll Rail",
+                                tint = SolarOrange.copy(alpha = 0.7f),
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Text(
+                                text = "REEL",
+                                fontSize = 8.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = InterFontFamily,
+                                color = SolarOrange.copy(alpha = 0.7f)
+                            )
+                        }
+
+                        // Quick Next Reel Button (Down)
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .background(SolarOrange)
+                                .clickable {
+                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    IdroidService.instance?.sendKeyPress("down")
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                Icons.Default.KeyboardArrowDown,
+                                contentDescription = "Next Reel",
+                                tint = PureWhite,
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
                     }
                 }
             }
@@ -370,6 +423,7 @@ fun TrackpadScreen(
                 modifier = Modifier.weight(1f)
             )
         }
+
 
         // Live Keyboard to Mac Card
         Surface(

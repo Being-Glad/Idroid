@@ -277,3 +277,122 @@ pub fn upload_file_to_phone(local_path: String) -> Result<String, String> {
         Err(String::from_utf8_lossy(&output.stderr).to_string())
     }
 }
+
+pub fn start_file_drop_server() {
+    std::thread::spawn(|| {
+        use std::net::TcpListener;
+
+        let listener = match TcpListener::bind("0.0.0.0:53108") {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("[Idroid File Server] Could not bind 53108: {:?}", e);
+                return;
+            }
+        };
+
+        println!("[Idroid File Server] Turbo file drop server listening on 0.0.0.0:53108");
+
+        for stream in listener.incoming() {
+            match stream {
+                Ok(mut socket) => {
+                    std::thread::spawn(move || {
+                        if let Err(e) = handle_incoming_file_stream(&mut socket) {
+                            eprintln!("[Idroid File Server] Stream error: {:?}", e);
+                        }
+                    });
+                }
+                Err(e) => {
+                    eprintln!("[Idroid File Server] Accept error: {:?}", e);
+                }
+            }
+        }
+    });
+}
+
+fn handle_incoming_file_stream(socket: &mut std::net::TcpStream) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::{Read, Write};
+
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    let drop_dir = std::path::PathBuf::from(format!("{}/Downloads/IdroidDrop", home));
+    let _ = std::fs::create_dir_all(&drop_dir);
+
+    // Read magic: [IDRD]
+    let mut magic = [0u8; 4];
+    socket.read_exact(&mut magic)?;
+    if &magic != b"IDRD" {
+        return Err("Invalid magic bytes".into());
+    }
+
+    // Read file count
+    let mut count_buf = [0u8; 4];
+    socket.read_exact(&mut count_buf)?;
+    let file_count = u32::from_be_bytes(count_buf);
+
+    println!("[Idroid File Server] Incoming batch of {} file(s)", file_count);
+    let mut total_bytes = 0u64;
+
+    for i in 0..file_count {
+        // Name length
+        let mut name_len_buf = [0u8; 2];
+        socket.read_exact(&mut name_len_buf)?;
+        let name_len = u16::from_be_bytes(name_len_buf) as usize;
+
+        // Name bytes
+        let mut name_buf = vec![0u8; name_len];
+        socket.read_exact(&mut name_buf)?;
+        let raw_name = String::from_utf8_lossy(&name_buf).to_string();
+        let safe_name = std::path::Path::new(&raw_name)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("received_file");
+
+        // File size
+        let mut size_buf = [0u8; 8];
+        socket.read_exact(&mut size_buf)?;
+        let file_size = u64::from_be_bytes(size_buf);
+
+        let target_file_path = drop_dir.join(safe_name);
+        println!("[Idroid File Server] Receiving [{}/{}]: {} ({} bytes)", i + 1, file_count, safe_name, file_size);
+
+        let mut out_file = std::fs::File::create(&target_file_path)?;
+        let mut remaining = file_size;
+        let mut chunk_buf = vec![0u8; 256 * 1024];
+
+        while remaining > 0 {
+            let to_read = (remaining as usize).min(chunk_buf.len());
+            let n = socket.read(&mut chunk_buf[..to_read])?;
+            if n == 0 {
+                return Err("Unexpected EOF while reading file stream".into());
+            }
+            out_file.write_all(&chunk_buf[..n])?;
+            remaining -= n as u64;
+            total_bytes += n as u64;
+        }
+        out_file.flush()?;
+    }
+
+    // Send confirmation OK
+    socket.write_all(b"OK\n")?;
+    socket.flush()?;
+
+    println!("[Idroid File Server] Successfully received {} files ({} MB)", file_count, total_bytes / (1024 * 1024));
+
+    // Play native macOS alert sound
+    let _ = Command::new("afplay").arg("/System/Library/Sounds/Glass.aiff").spawn();
+
+    // Trigger macOS native notification
+    let _ = super::notifications::show_mac_system_notification(
+        "Idroid Drop".into(),
+        "Files Received from Phone".into(),
+        format!("Saved {} file(s) to ~/Downloads/IdroidDrop", file_count),
+    );
+
+    // Emit event to frontend
+    super::emit_to_windows("files_received_from_phone", serde_json::json!({
+        "count": file_count,
+        "total_bytes": total_bytes,
+        "folder": drop_dir.to_string_lossy().to_string()
+    }));
+
+    Ok(())
+}

@@ -1,4 +1,4 @@
-# macOS system files
+# macOS System Files
 .DS_Store
 .AppleDouble
 .LSOverride
@@ -6,7 +6,32 @@
 .Spotlight-V100
 .Trashes
 
-# Node & Frontend
+# Antigravity IDE & Local Agent Customizations (Available locally, excluded from Git)
+.docs/
+.agents/
+
+# Android Binaries & Releases (Present locally for ADB/testing, excluded from Git repo)
+*.apk
+*.aab
+Idroid-Companion.apk
+desktop/public/idroid.apk
+*.keystore
+!debug.keystore
+
+# Android & Gradle Build Artifacts
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+android/*.iml
+android/app/*.iml
+android/.cxx/
+android/app/.cxx/
+.gradle/
+build/
+
+# Node & Desktop Frontend
 node_modules/
 desktop/node_modules/
 desktop/dist/
@@ -17,25 +42,24 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# Rust & Tauri
+# Rust & Tauri Native Desktop
 desktop/src-tauri/target/
 target/
 **/*.rs.bk
 
-# Android & Gradle
-android/.gradle/
-android/build/
-android/app/build/
-android/local.properties
-android/.idea/
-android/*.iml
-android/app/*.iml
-.gradle/
-build/
-*.keystore
-!debug.keystore
-
-# Temporary and Scratch Files
+# Local Previews, Backups & Scratch Files
+desktop/public/*-preview.html
+*.bak
+*.backup
+*~
+*.swp
+*.swo
 test_*
 *.tmp
 scratch/
+
+# IDE & Editor User Configuration
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json

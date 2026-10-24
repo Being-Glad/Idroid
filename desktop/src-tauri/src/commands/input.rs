@@ -17,6 +17,10 @@ pub fn execute_mac_type_text(text: &str) {
         execute_mac_press_key("return");
         return;
     }
+    if text == "l" || text == "L" {
+        execute_mac_press_key("like");
+        return;
+    }
     // High-performance CoreGraphics unicode keyboard event injection
     if let Ok(c_str) = std::ffi::CString::new(text) {
         unsafe {
@@ -31,7 +35,7 @@ pub fn execute_mac_type_text(text: &str) {
 }
 
 pub fn execute_mac_press_key(key: &str) {
-    let key_code = match key {
+    let key_code = match key.to_lowercase().as_str() {
         "return" | "enter" => Some(36),
         "backspace" | "delete" => Some(51),
         "space" => Some(49),
@@ -41,18 +45,23 @@ pub fn execute_mac_press_key(key: &str) {
         "down" => Some(125),
         "left" => Some(123),
         "right" => Some(124),
+        "like" | "l" => Some(37), // 'L' - Like shortcut on Instagram Reels & media
+        "k" => Some(40),
+        "m" | "mute" => Some(46),
         _ => None,
     };
 
+    // 1. Direct low-level C HID event injection
+    if let Ok(c_str) = std::ffi::CString::new(key) {
+        unsafe {
+            mac_press_key(c_str.as_ptr());
+        }
+    }
+
+    // 2. Secondary AppleScript fallback to guarantee active browser/window delivery
     if let Some(code) = key_code {
         let script = format!("tell application \"System Events\" to key code {}", code);
         let _ = Command::new("osascript").args(["-e", &script]).spawn();
-    } else {
-        if let Ok(c_str) = std::ffi::CString::new(key) {
-            unsafe {
-                mac_press_key(c_str.as_ptr());
-            }
-        }
     }
 }
 

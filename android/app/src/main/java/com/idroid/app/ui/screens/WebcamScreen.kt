@@ -158,15 +158,17 @@ fun WebcamScreen(
                     }
                 }
             } else {
+                val refShape = RoundedCornerShape(12.dp)
                 Surface(
-                    color = ObsidianSurfaceVariant,
-                    shape = RoundedCornerShape(12.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, ObsidianBorder),
-                    modifier = Modifier.clickable {
+                    onClick = {
                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                         IdroidService.instance?.sendRaw("""{"type":"command","action":"get_apps"}""")
                         Toast.makeText(context, "Scanning installed Mac apps...", Toast.LENGTH_SHORT).show()
-                    }
+                    },
+                    color = ObsidianSurfaceVariant,
+                    shape = refShape,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, ObsidianBorder),
+                    modifier = Modifier.clip(refShape)
                 ) {
                     Row(
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),

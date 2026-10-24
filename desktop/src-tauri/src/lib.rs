@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod camera_server;
+pub mod tray;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -12,8 +13,25 @@ pub fn run() {
             .build(),
         )?;
       }
+      commands::set_app_handle(app.handle().clone());
       commands::start_companion_server();
+      commands::files::start_file_drop_server();
       camera_server::start_camera_stream_server();
+      commands::clipboard::start_mac_clipboard_monitor();
+
+      // Ensure macOS Dock displays the official Idroid app icon dynamically
+      unsafe extern "C" {
+        fn set_mac_dock_icon_from_png(path: *const std::os::raw::c_char);
+      }
+      let icon_bytes = include_bytes!("../icons/icon.png");
+      let _ = std::fs::write("/tmp/idroid_dock_icon.png", icon_bytes);
+      if let Ok(c_str) = std::ffi::CString::new("/tmp/idroid_dock_icon.png") {
+        unsafe { set_mac_dock_icon_from_png(c_str.as_ptr()); }
+      }
+
+      if let Err(e) = tray::setup_tray(&app.handle()) {
+        eprintln!("[Idroid Tray] Failed to initialize native tray: {:?}", e);
+      }
       use tauri::Manager;
       if let Some(win) = app.get_webview_window("main") {
         let _ = win.show();
@@ -90,15 +108,26 @@ pub fn run() {
       commands::answer_phone_call,
       commands::set_call_audio_route,
       commands::check_incoming_call,
+      commands::get_call_state,
       commands::toggle_call_mute,
       commands::record_call_audio,
       commands::get_call_history,
+      commands::delete_call_record,
+      commands::clear_call_history,
+      commands::get_phone_contacts,
+      commands::add_phone_contact,
+      commands::delete_phone_contact,
+      commands::edit_phone_contact,
       commands::get_notification_list,
       commands::reply_notification,
       commands::send_sms,
       commands::paste_to_phone,
       commands::get_clipboard_history,
+      commands::toggle_pin_clipboard,
+      commands::delete_clipboard_entry,
+      commands::clear_clipboard_history,
       commands::sync_clipboard_content,
+      commands::copy_image_to_clipboard,
       commands::switch_to_wireless_tcpip,
       commands::connect_wireless_ip,
       commands::pair_wireless_device,
@@ -112,6 +141,11 @@ pub fn run() {
       commands::get_quick_phone_apps,
       commands::get_host_telemetry,
       commands::get_mac_bluetooth_status,
+      commands::get_mac_bluetooth_devices,
+      commands::connect_mac_bluetooth_device,
+      commands::disconnect_mac_bluetooth_device,
+      commands::get_mac_wifi_info,
+      commands::set_mac_wifi_power,
       commands::open_mac_bluetooth_settings,
       commands::get_device_wallpapers,
       commands::open_received_files,
@@ -124,6 +158,20 @@ pub fn run() {
       commands::focus_camera_player,
       commands::set_camera_orientation,
       commands::get_camera_orientation,
+      commands::get_phone_bluetooth_state,
+      commands::toggle_phone_bluetooth,
+      commands::get_phone_wifi_state,
+      commands::toggle_phone_wifi,
+      commands::get_phone_location_state,
+      commands::toggle_phone_location,
+      commands::get_mac_location_services_state,
+      commands::toggle_mac_location_services,
+      commands::get_phone_hotspot_state,
+      commands::get_trusted_devices,
+      commands::revoke_trusted_device,
+      commands::approve_device_authorization,
+      commands::reject_device_authorization,
+      commands::get_security_status,
     ])
     .on_window_event(|_window, event| {
       if let tauri::WindowEvent::CloseRequested { .. } = event {

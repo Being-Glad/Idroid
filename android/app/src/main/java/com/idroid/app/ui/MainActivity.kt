@@ -40,9 +40,37 @@ class MainActivity : ComponentActivity() {
     private var initialIp by mutableStateOf("192.168.1.10")
     private var initialPort by mutableStateOf(53100)
 
+    private val requestPermissionsLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
+    ) {
+        IdroidService.instance?.refreshListeners()
+    }
+
+    private fun checkAndRequestPermissions() {
+        val permissions = mutableListOf(
+            android.Manifest.permission.READ_PHONE_STATE,
+            android.Manifest.permission.READ_CALL_LOG,
+            android.Manifest.permission.WRITE_CALL_LOG,
+            android.Manifest.permission.READ_CONTACTS,
+            android.Manifest.permission.WRITE_CONTACTS,
+            android.Manifest.permission.CALL_PHONE,
+            android.Manifest.permission.MODIFY_AUDIO_SETTINGS
+        )
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            permissions.add(android.Manifest.permission.POST_NOTIFICATIONS)
+        }
+        val needed = permissions.filter {
+            androidx.core.content.ContextCompat.checkSelfPermission(this, it) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        }
+        if (needed.isNotEmpty()) {
+            requestPermissionsLauncher.launch(needed.toTypedArray())
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        checkAndRequestPermissions()
         val prefs = getSharedPreferences("idroid_config", Context.MODE_PRIVATE)
         val savedIp = prefs.getString("last_ip", null)
         val savedPort = prefs.getInt("last_port", 53100)
@@ -82,13 +110,18 @@ class MainActivity : ComponentActivity() {
         if (uri.scheme == "idroid" && uri.host == "pair") {
             val ip = uri.getQueryParameter("ip")
             val portStr = uri.getQueryParameter("port")
+            val token = uri.getQueryParameter("token") ?: ""
             if (!ip.isNullOrBlank()) {
                 initialIp = ip
                 initialPort = portStr?.toIntOrNull() ?: 53100
                 val prefs = getSharedPreferences("idroid_config", Context.MODE_PRIVATE)
-                prefs.edit().putString("last_ip", initialIp).putInt("last_port", initialPort).apply()
+                val editor = prefs.edit().putString("last_ip", initialIp).putInt("last_port", initialPort)
+                if (token.isNotBlank()) {
+                    editor.putString("pairing_token", token)
+                }
+                editor.apply()
                 connectService(initialIp, initialPort)
-                Toast.makeText(this, "Paired with $ip:$initialPort", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Paired securely with $ip:$initialPort", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -148,6 +181,11 @@ fun MainAppScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
+                        androidx.compose.foundation.Image(
+                            painter = androidx.compose.ui.res.painterResource(id = com.idroid.app.R.drawable.ic_idroid_brand),
+                            contentDescription = "Idroid Logo",
+                            modifier = Modifier.size(24.dp)
+                        )
                         Text(
                             text = "Idroid",
                             fontSize = 20.sp,
@@ -168,16 +206,18 @@ fun MainAppScreen(
                 actions = {
                     if (isConnected) {
                         // Sleek, minimal 2026 Connected Glass Pill (e.g. "Om's Mac • 100% ⚡")
+                        val statusShape = RoundedCornerShape(20.dp)
                         Surface(
+                            onClick = { showSettingsModal = true },
                             color = ObsidianSurfaceVariant.copy(alpha = 0.6f),
-                            shape = RoundedCornerShape(20.dp),
+                            shape = statusShape,
                             border = androidx.compose.foundation.BorderStroke(
                                 1.dp,
                                 ObsidianBorder.copy(alpha = 0.7f)
                             ),
                             modifier = Modifier
-                                .clickable { showSettingsModal = true }
                                 .padding(end = 4.dp)
+                                .clip(statusShape)
                         ) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
@@ -203,12 +243,13 @@ fun MainAppScreen(
 
                     // Sleek circular glass icon button for Diagnostics / Help
                     Surface(
+                        onClick = { showDoctorModal = true },
                         color = ObsidianSurfaceVariant.copy(alpha = 0.6f),
                         shape = CircleShape,
                         border = androidx.compose.foundation.BorderStroke(1.dp, ObsidianBorder.copy(alpha = 0.7f)),
                         modifier = Modifier
                             .size(34.dp)
-                            .clickable { showDoctorModal = true }
+                            .clip(CircleShape)
                     ) {
                         Box(contentAlignment = Alignment.Center) {
                             Icon(
@@ -224,12 +265,13 @@ fun MainAppScreen(
 
                     // Sleek circular glass icon button for Settings
                     Surface(
+                        onClick = { showSettingsModal = true },
                         color = ObsidianSurfaceVariant.copy(alpha = 0.6f),
                         shape = CircleShape,
                         border = androidx.compose.foundation.BorderStroke(1.dp, ObsidianBorder.copy(alpha = 0.7f)),
                         modifier = Modifier
                             .size(34.dp)
-                            .clickable { showSettingsModal = true }
+                            .clip(CircleShape)
                     ) {
                         Box(contentAlignment = Alignment.Center) {
                             Icon(
@@ -248,114 +290,15 @@ fun MainAppScreen(
     ) { innerPadding ->
         // Settings & Device Diagnostics Modal
         if (showSettingsModal) {
-            AlertDialog(
-                onDismissRequest = { showSettingsModal = false },
-                containerColor = ObsidianSurface,
-                shape = RoundedCornerShape(28.dp),
-                title = {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        Icon(Icons.Default.Tune, contentDescription = null, tint = SolarOrange)
-                        Text(
-                            text = "Idroid Settings",
-                            fontFamily = InterFontFamily,
-                            fontWeight = FontWeight.Bold,
-                            color = PureWhite
-                        )
-                    }
-                },
-                text = {
-                    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                        Text(
-                            text = "Connected Device: ${macName.ifBlank { "Apple Mac" }}",
-                            fontSize = 13.5.sp,
-                            fontFamily = InterFontFamily,
-                            color = TextSecondary
-                        )
-
-                        Text(
-                            text = "Transport Mode: $connType (Wi-Fi Direct Mesh)",
-                            fontSize = 12.sp,
-                            fontFamily = InterFontFamily,
-                            color = TextMuted
-                        )
-
-                        if (isConnected) {
-                            HorizontalDivider(color = ObsidianBorder, thickness = 1.dp)
-
-                            // Lock Screen Action
-                            OutlinedButton(
-                                onClick = {
-                                    IdroidService.instance?.sendCommand("lock_mac")
-                                    Toast.makeText(context, "Mac display locked", Toast.LENGTH_SHORT).show()
-                                },
-                                shape = RoundedCornerShape(14.dp),
-                                border = androidx.compose.foundation.BorderStroke(1.dp, ObsidianBorder),
-                                colors = ButtonDefaults.outlinedButtonColors(contentColor = PureWhite),
-                                modifier = Modifier.fillMaxWidth().height(44.dp)
-                            ) {
-                                Icon(Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(Modifier.width(8.dp))
-                                Text("Lock Mac Screen", fontFamily = InterFontFamily, fontWeight = FontWeight.SemiBold)
-                            }
-
-                            // Sleep Mac Action
-                            OutlinedButton(
-                                onClick = {
-                                    IdroidService.instance?.sendCommand("sleep_mac")
-                                    Toast.makeText(context, "Mac sleeping...", Toast.LENGTH_SHORT).show()
-                                },
-                                shape = RoundedCornerShape(14.dp),
-                                border = androidx.compose.foundation.BorderStroke(1.dp, ObsidianBorder),
-                                colors = ButtonDefaults.outlinedButtonColors(contentColor = PureWhite),
-                                modifier = Modifier.fillMaxWidth().height(44.dp)
-                            ) {
-                                Icon(Icons.Default.Bedtime, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(Modifier.width(8.dp))
-                                Text("Sleep Mac", fontFamily = InterFontFamily, fontWeight = FontWeight.SemiBold)
-                            }
-
-                            // Open Doctor & Diagnostics
-                            OutlinedButton(
-                                onClick = {
-                                    showSettingsModal = false
-                                    showDoctorModal = true
-                                },
-                                shape = RoundedCornerShape(14.dp),
-                                border = androidx.compose.foundation.BorderStroke(1.dp, SolarOrange.copy(alpha = 0.4f)),
-                                colors = ButtonDefaults.outlinedButtonColors(contentColor = SolarOrange),
-                                modifier = Modifier.fillMaxWidth().height(44.dp)
-                            ) {
-                                Icon(Icons.Default.MedicalServices, contentDescription = null, modifier = Modifier.size(16.dp), tint = SolarOrange)
-                                Spacer(Modifier.width(8.dp))
-                                Text("Open Idroid Doctor & Help", fontFamily = InterFontFamily, fontWeight = FontWeight.SemiBold, color = SolarOrange)
-                            }
-
-                            // Disconnect Action
-                            Button(
-                                onClick = {
-                                    showSettingsModal = false
-                                    IdroidService.instance?.disconnect()
-                                    Toast.makeText(context, "Disconnected from Mac", Toast.LENGTH_SHORT).show()
-                                },
-                                shape = RoundedCornerShape(14.dp),
-                                colors = ButtonDefaults.buttonColors(containerColor = CrimsonDanger.copy(alpha = 0.2f), contentColor = CrimsonDanger),
-                                border = androidx.compose.foundation.BorderStroke(1.dp, CrimsonDanger.copy(alpha = 0.4f)),
-                                modifier = Modifier.fillMaxWidth().height(46.dp)
-                            ) {
-                                Icon(Icons.Default.PowerSettingsNew, contentDescription = null, modifier = Modifier.size(16.dp), tint = CrimsonDanger)
-                                Spacer(Modifier.width(8.dp))
-                                Text("Disconnect Wireless Session", fontFamily = InterFontFamily, fontWeight = FontWeight.Bold, color = CrimsonDanger)
-                            }
-                        }
-                    }
-                },
-                confirmButton = {
-                    TextButton(onClick = { showSettingsModal = false }) {
-                        Text("Done", color = SolarOrange, fontFamily = InterFontFamily, fontWeight = FontWeight.Bold)
-                    }
+            com.idroid.app.ui.widgets.SettingsModal(
+                macName = macName,
+                connType = connType,
+                isConnected = isConnected,
+                onDismiss = { showSettingsModal = false },
+                onOpenDoctor = { showDoctorModal = true },
+                onDisconnect = {
+                    IdroidService.instance?.disconnect()
+                    Toast.makeText(context, "Disconnected from Mac", Toast.LENGTH_SHORT).show()
                 }
             )
         }

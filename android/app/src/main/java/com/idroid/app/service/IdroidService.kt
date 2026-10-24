@@ -9,16 +9,30 @@ import android.widget.Toast
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import com.idroid.app.R
 import com.idroid.app.model.ClipboardPayload
 import com.idroid.app.network.TcpClient
 import kotlinx.coroutines.*
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import android.telephony.TelephonyManager
+import android.telephony.PhoneStateListener
+import android.telephony.TelephonyCallback
+import android.media.AudioManager
+import android.media.AudioDeviceInfo
+import android.view.KeyEvent
+import android.provider.CallLog
+import android.provider.ContactsContract
+import android.database.ContentObserver
 
 class IdroidService : Service() {
 
     private var tcpClient: TcpClient? = null
     private var macIpAddress: String = ""
+
+    private var isUpdatingClipboardInternally = false
+    private var lastSentImageHash: Int = 0
+    private var lastSentText: String? = null
 
     private val packageChangeReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -30,6 +44,10 @@ class IdroidService : Service() {
             }
         }
     }
+
+    private var telephonyManager: TelephonyManager? = null
+    private var phoneStateListener: PhoneStateListener? = null
+    private var telephonyCallback: Any? = null
 
     private val bluetoothReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -78,6 +96,10 @@ class IdroidService : Service() {
         } catch (e: Exception) {
             e.printStackTrace()
         }
+
+        setupTelephonyListener()
+        setupContentObservers()
+        setupClipboardListener()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -124,14 +146,36 @@ class IdroidService : Service() {
                 if (isConnected) {
                     sendHandshake()
                     sendQuickAppsIcons()
+                    requestMacWifiStatus()
                 }
             },
             onError = { errorReason ->
-                android.os.Handler(android.os.Looper.getMainLooper()).post {
-                    CompanionBridge.isConnecting.value = false
-                    CompanionBridge.connectionError.value = errorReason
+                if (ip != "127.0.0.1") {
+                    kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                        try {
+                            val probeSocket = java.net.Socket()
+                            probeSocket.connect(java.net.InetSocketAddress("127.0.0.1", 53100), 300)
+                            probeSocket.close()
+                            android.util.Log.i("IdroidService", "Wi-Fi link to $ip unreachable, automatically falling back to USB 127.0.0.1")
+                            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                connectToMac("127.0.0.1", 53100)
+                            }
+                            return@launch
+                        } catch (_: Exception) {}
+
+                        android.os.Handler(android.os.Looper.getMainLooper()).post {
+                            CompanionBridge.isConnecting.value = false
+                            CompanionBridge.connectionError.value = errorReason
+                        }
+                    }
+                } else {
+                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                        CompanionBridge.isConnecting.value = false
+                        CompanionBridge.connectionError.value = errorReason
+                    }
                 }
-            }
+            },
+            context = this
         )
         tcpClient?.connect()
     }
@@ -229,8 +273,26 @@ class IdroidService : Service() {
             val deviceIp = getWifiIpAddress(this)
             val btStatus = com.idroid.app.utils.BluetoothHelper.getStatus(this)
 
+            val prefs = getSharedPreferences("idroid_config", Context.MODE_PRIVATE)
+            var deviceId = prefs.getString("device_uuid", null)
+            if (deviceId.isNullOrBlank()) {
+                val androidId = try {
+                    android.provider.Settings.Secure.getString(contentResolver, android.provider.Settings.Secure.ANDROID_ID)
+                } catch (_: Exception) { null }
+                deviceId = if (!androidId.isNullOrBlank() && androidId != "9774d56d682e549c") {
+                    androidId
+                } else {
+                    java.util.UUID.randomUUID().toString()
+                }
+                prefs.edit().putString("device_uuid", deviceId).apply()
+            }
+
+            val pairingToken = prefs.getString("pairing_token", "") ?: ""
+
             val json = org.json.JSONObject().apply {
                 put("type", "handshake")
+                put("device_id", deviceId)
+                put("pairing_token", pairingToken)
                 put("device_name", deviceName)
                 put("brand", android.os.Build.BRAND ?: "Samsung")
                 put("device_ip", deviceIp)
@@ -274,6 +336,16 @@ class IdroidService : Service() {
         try {
             val obj = org.json.JSONObject(rawJson)
             when (obj.optString("type")) {
+                "auth_rejected" -> {
+                    val reason = obj.optString("reason", "Connection not authorized by Mac user")
+                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                        CompanionBridge.isConnecting.value = false
+                        CompanionBridge.isConnected.value = false
+                        CompanionBridge.connectionError.value = "Security Authorization Required: $reason"
+                        Toast.makeText(this, "Mac Authorization Required: Scan QR code or authorize on Mac", Toast.LENGTH_LONG).show()
+                    }
+                    tcpClient?.disconnect()
+                }
                 "mac_status" -> {
                     val macBt = obj.optString("bluetooth_status", "")
                     android.os.Handler(android.os.Looper.getMainLooper()).post {
@@ -282,6 +354,9 @@ class IdroidService : Service() {
                         CompanionBridge.connectionType.value = obj.optString("connection_type", "on the air")
                         CompanionBridge.macBattery.value = obj.optInt("battery", 100)
                         CompanionBridge.macIsCharging.value = obj.optBoolean("is_charging", true)
+                        if (obj.has("mac_location_enabled")) {
+                            CompanionBridge.macLocationEnabled.value = obj.optBoolean("mac_location_enabled", false)
+                        }
                         if (macBt.isNotBlank()) {
                             CompanionBridge.macBluetoothStatus.value = macBt
                         }
@@ -289,6 +364,8 @@ class IdroidService : Service() {
                         if (clip.isNotBlank()) {
                             CompanionBridge.macClipboard.value = clip
                         }
+                        val clipArr = obj.optJSONArray("clipboard_history") ?: obj.optJSONArray("history")
+                        parseClipboardHistory(clipArr)
                         if (obj.has("volume")) {
                             CompanionBridge.macVolume.value = obj.optInt("volume", 50) / 100f
                         }
@@ -333,6 +410,10 @@ class IdroidService : Service() {
                         }
                     }
                 }
+                "request_handshake" -> {
+                    sendHandshake()
+                    sendQuickAppsIcons()
+                }
                 "pong" -> {
                     android.os.Handler(android.os.Looper.getMainLooper()).post {
                         CompanionBridge.macBattery.value = obj.optInt("battery", CompanionBridge.macBattery.value)
@@ -350,10 +431,47 @@ class IdroidService : Service() {
                     }
                 }
                 "clipboard_update" -> {
+                    val imgB64 = obj.optString("image_base64", "").takeIf { it.isNotBlank() }
                     val content = obj.optString("content", "")
-                    if (content.isNotBlank()) {
+                    if (imgB64 != null) {
+                        android.os.Handler(android.os.Looper.getMainLooper()).post {
+                            CompanionBridge.macClipboard.value = "[Image]"
+                            setAndroidClipboardImage(imgB64)
+                        }
+                    } else if (content.isNotBlank()) {
                         android.os.Handler(android.os.Looper.getMainLooper()).post {
                             CompanionBridge.macClipboard.value = content
+                            try {
+                                isUpdatingClipboardInternally = true
+                                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+                                val clip = android.content.ClipData.newPlainText("Idroid Mac", content)
+                                cm?.setPrimaryClip(clip)
+                            } catch (_: Exception) {} finally {
+                                isUpdatingClipboardInternally = false
+                            }
+                        }
+                    }
+                    val clipArr = obj.optJSONArray("clipboard_history") ?: obj.optJSONArray("history")
+                    parseClipboardHistory(clipArr)
+                }
+                "clipboard_history" -> {
+                    val clipArr = obj.optJSONArray("clipboard_history") ?: obj.optJSONArray("history")
+                    parseClipboardHistory(clipArr)
+                }
+                "reply_notification", "command" -> {
+                    val action = obj.optString("action", obj.optString("type", ""))
+                    if (action == "reply_notification" || obj.optString("type") == "reply_notification") {
+                        val notifId = obj.optString("id", obj.optString("notificationId", ""))
+                        val replyText = obj.optString("text", obj.optString("reply_text", ""))
+                        if (notifId.isNotBlank() && replyText.isNotBlank()) {
+                            val ok = IdroidNotificationService.replyToNotification(notifId, replyText)
+                            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                Toast.makeText(
+                                    applicationContext,
+                                    if (ok) "Replied: $replyText" else "Notification closed or not replyable",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
                         }
                     }
                 }
@@ -364,6 +482,82 @@ class IdroidService : Service() {
                             Toast.makeText(applicationContext, message, Toast.LENGTH_SHORT).show()
                         }
                     }
+                }
+                "mac_bluetooth_devices" -> {
+                    val arr = obj.optJSONArray("devices")
+                    val list = mutableListOf<MacBtDevice>()
+                    if (arr != null) {
+                        for (i in 0 until arr.length()) {
+                            val d = arr.optJSONObject(i) ?: continue
+                            list.add(
+                                MacBtDevice(
+                                    name = d.optString("name", "Unknown Device"),
+                                    address = d.optString("address", ""),
+                                    connected = d.optBoolean("connected", false)
+                                )
+                            )
+                        }
+                    }
+                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                        CompanionBridge.macBtDevices.clear()
+                        CompanionBridge.macBtDevices.addAll(list)
+                        CompanionBridge.isFetchingMacBt.value = false
+                        CompanionBridge.connectingBtAddress.value = null
+                    }
+                }
+                "mac_bt_result" -> {
+                    val msg = obj.optString("message", "")
+                    val devicesArr = obj.optJSONArray("devices")
+                    val list = mutableListOf<MacBtDevice>()
+                    if (devicesArr != null) {
+                        for (i in 0 until devicesArr.length()) {
+                            val d = devicesArr.optJSONObject(i) ?: continue
+                            list.add(
+                                MacBtDevice(
+                                    name = d.optString("name", "Unknown Device"),
+                                    address = d.optString("address", ""),
+                                    connected = d.optBoolean("connected", false)
+                                )
+                            )
+                        }
+                    }
+                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                        if (list.isNotEmpty()) {
+                            CompanionBridge.macBtDevices.clear()
+                            CompanionBridge.macBtDevices.addAll(list)
+                        }
+                        CompanionBridge.connectingBtAddress.value = null
+                        if (msg.isNotBlank()) {
+                            Toast.makeText(applicationContext, msg, Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+                "mac_wifi_status" -> {
+                    val power = obj.optBoolean("power", true)
+                    val ssid = obj.optString("ssid", "")
+                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                        CompanionBridge.macWifiPower.value = power
+                        CompanionBridge.macWifiSsid.value = ssid
+                        CompanionBridge.isFetchingMacWifi.value = false
+                    }
+                }
+                "set_call_audio_route" -> {
+                    val route = obj.optString("route", "phone")
+                    applyCallAudioRoute(route)
+                }
+                "get_phone_contacts" -> {
+                    sendPhoneContacts()
+                }
+                "get_call_history" -> {
+                    sendPhoneCallHistory()
+                }
+                "delete_call_record" -> {
+                    val recordId = obj.optString("id", "")
+                    val number = obj.optString("number", "")
+                    deleteCallLogEntry(recordId, number)
+                }
+                "clear_call_history" -> {
+                    clearCallLogEntries()
                 }
             }
         } catch (e: Exception) {
@@ -404,6 +598,35 @@ class IdroidService : Service() {
         sendCommand("media_key", "key", key)
     }
 
+    fun requestMacBluetoothDevices() {
+        CompanionBridge.isFetchingMacBt.value = true
+        sendCommand("get_mac_bluetooth_devices")
+    }
+
+    fun connectMacBluetoothDevice(address: String) {
+        CompanionBridge.connectingBtAddress.value = address
+        sendCommand("connect_mac_bt", "address", address)
+    }
+
+    fun disconnectMacBluetoothDevice(address: String) {
+        CompanionBridge.connectingBtAddress.value = address
+        sendCommand("disconnect_mac_bt", "address", address)
+    }
+
+    fun requestMacWifiStatus() {
+        CompanionBridge.isFetchingMacWifi.value = true
+        sendCommand("get_mac_wifi_status")
+    }
+
+    fun setMacWifiPower(power: Boolean) {
+        val obj = org.json.JSONObject().apply {
+            put("type", "command")
+            put("action", "set_mac_wifi_power")
+            put("power", power)
+        }
+        sendRaw(obj.toString())
+    }
+
     fun sendMouseMove(dx: Float, dy: Float) {
         val obj = org.json.JSONObject().apply {
             put("type", "command")
@@ -431,10 +654,185 @@ class IdroidService : Service() {
         sendRaw(obj.toString())
     }
 
+    private fun parseClipboardHistory(arr: org.json.JSONArray?) {
+        if (arr == null) return
+        val list = mutableListOf<ClipboardItem>()
+        for (i in 0 until arr.length()) {
+            val item = arr.optJSONObject(i) ?: continue
+            list.add(
+                ClipboardItem(
+                    id = item.optString("id", java.util.UUID.randomUUID().toString()),
+                    text = item.optString("text", ""),
+                    source = item.optString("source", "Mac"),
+                    time = item.optString("time", "Just now"),
+                    pinned = item.optBoolean("pinned", false),
+                    imageBase64 = item.optString("image_base64", "").takeIf { it.isNotBlank() }
+                )
+            )
+        }
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            CompanionBridge.clipboardHistory.clear()
+            CompanionBridge.clipboardHistory.addAll(list)
+            if (list.isNotEmpty() && CompanionBridge.macClipboard.value.isBlank()) {
+                val first = list.first()
+                CompanionBridge.macClipboard.value = if (!first.imageBase64.isNullOrBlank()) "[Image]" else first.text
+            }
+        }
+    }
+
     fun sendClipboard(text: String) {
         val obj = org.json.JSONObject().apply {
             put("type", "clipboard_push")
             put("text", text)
+        }
+        sendRaw(obj.toString())
+    }
+
+    fun sendImageClipboard(b64: String) {
+        val obj = org.json.JSONObject().apply {
+            put("type", "clipboard_push")
+            put("image_base64", b64)
+        }
+        sendRaw(obj.toString())
+    }
+
+    fun setAndroidClipboardImage(b64: String) {
+        try {
+            val bytes = android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
+            val imageFile = java.io.File(cacheDir, "shared_clipboard_image.png")
+            imageFile.writeBytes(bytes)
+            imageFile.setReadable(true, false)
+            lastSentImageHash = bytes.contentHashCode()
+
+            val uri = androidx.core.content.FileProvider.getUriForFile(
+                this,
+                "com.idroid.app.fileprovider",
+                imageFile
+            )
+            val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+            val description = android.content.ClipDescription("Idroid Image", arrayOf("image/png", "image/jpeg", "image/*"))
+            val item = android.content.ClipData.Item(uri)
+            val clip = android.content.ClipData(description, item)
+
+            // Grant URI read permission for keyboards and messaging apps
+            val targetPackages = listOf(
+                "com.google.android.inputmethod.latin",
+                "com.samsung.android.honeyboard",
+                "com.whatsapp",
+                "com.google.android.apps.messaging",
+                "com.samsung.android.messaging"
+            )
+            for (pkg in targetPackages) {
+                try {
+                    grantUriPermission(pkg, uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                } catch (_: Exception) {}
+            }
+
+            isUpdatingClipboardInternally = true
+            cm?.setPrimaryClip(clip)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        } finally {
+            isUpdatingClipboardInternally = false
+        }
+    }
+
+    private fun setupClipboardListener() {
+        try {
+            val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager ?: return
+            cm.addPrimaryClipChangedListener {
+                if (isUpdatingClipboardInternally) return@addPrimaryClipChangedListener
+                try {
+                    val clip = cm.primaryClip ?: return@addPrimaryClipChangedListener
+                    if (clip.itemCount == 0) return@addPrimaryClipChangedListener
+                    val item = clip.getItemAt(0)
+                    
+                    // 1. Check for image URI (copied image or screenshot)
+                    val uri = item.uri
+                    if (uri != null) {
+                        val mimeType = contentResolver.getType(uri) ?: clip.description?.let {
+                            if (it.hasMimeType("image/*")) "image/png" else null
+                        }
+                        if (mimeType != null && mimeType.startsWith("image/")) {
+                            contentResolver.openInputStream(uri)?.use { stream ->
+                                val bytes = stream.readBytes()
+                                if (bytes.isNotEmpty()) {
+                                    val hash = bytes.contentHashCode()
+                                    if (hash != lastSentImageHash) {
+                                        lastSentImageHash = hash
+                                        val b64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+                                        sendImageClipboard(b64)
+                                        return@addPrimaryClipChangedListener
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    // 2. Fall back to text
+                    val text = item.text?.toString() ?: item.coerceToText(this)?.toString()
+                    if (!text.isNullOrBlank() && text != lastSentText) {
+                        lastSentText = text
+                        sendClipboard(text)
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    fun togglePinClipboard(id: String) {
+        // Optimistic local state update for 0ms visual feedback
+        val index = CompanionBridge.clipboardHistory.indexOfFirst { it.id == id }
+        if (index != -1) {
+            val item = CompanionBridge.clipboardHistory[index]
+            val updated = item.copy(pinned = !item.pinned)
+            CompanionBridge.clipboardHistory.removeAt(index)
+            if (updated.pinned) {
+                CompanionBridge.clipboardHistory.add(0, updated)
+            } else {
+                val firstUnpinned = CompanionBridge.clipboardHistory.indexOfFirst { !it.pinned }
+                if (firstUnpinned != -1) {
+                    CompanionBridge.clipboardHistory.add(firstUnpinned, updated)
+                } else {
+                    CompanionBridge.clipboardHistory.add(updated)
+                }
+            }
+        }
+        val obj = org.json.JSONObject().apply {
+            put("type", "command")
+            put("action", "toggle_pin_clipboard")
+            put("id", id)
+        }
+        sendRaw(obj.toString())
+    }
+
+    fun deleteClipboardItem(id: String) {
+        CompanionBridge.clipboardHistory.removeAll { it.id == id }
+        val obj = org.json.JSONObject().apply {
+            put("type", "command")
+            put("action", "delete_clipboard_entry")
+            put("id", id)
+        }
+        sendRaw(obj.toString())
+    }
+
+    fun clearClipboardHistory() {
+        CompanionBridge.clipboardHistory.removeAll { !it.pinned }
+        val obj = org.json.JSONObject().apply {
+            put("type", "command")
+            put("action", "clear_clipboard_history")
+        }
+        sendRaw(obj.toString())
+    }
+
+    fun requestClipboardHistory() {
+        val obj = org.json.JSONObject().apply {
+            put("type", "command")
+            put("action", "get_clipboard_history")
         }
         sendRaw(obj.toString())
     }
@@ -493,7 +891,8 @@ class IdroidService : Service() {
         NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Idroid Companion")
             .setContentText(status)
-            .setSmallIcon(android.R.drawable.stat_notify_sync)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setColor(0xFF007AFF.toInt())
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
@@ -503,6 +902,388 @@ class IdroidService : Service() {
         manager.notify(NOTIFICATION_ID, buildForegroundNotification(status))
     }
 
+    private fun setupTelephonyListener() {
+        try {
+            telephonyManager = getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val callback = object : TelephonyCallback(), TelephonyCallback.CallStateListener {
+                    override fun onCallStateChanged(state: Int) {
+                        handleCallStateTransition(state, null)
+                    }
+                }
+                telephonyCallback = callback
+                telephonyManager?.registerTelephonyCallback(androidx.core.content.ContextCompat.getMainExecutor(this), callback)
+            } else {
+                @Suppress("DEPRECATION")
+                val listener = object : PhoneStateListener() {
+                    @Deprecated("Deprecated in Java")
+                    override fun onCallStateChanged(state: Int, phoneNumber: String?) {
+                        handleCallStateTransition(state, phoneNumber)
+                    }
+                }
+                phoneStateListener = listener
+                @Suppress("DEPRECATION")
+                telephonyManager?.listen(listener, PhoneStateListener.LISTEN_CALL_STATE)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun teardownTelephonyListener() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                (telephonyCallback as? TelephonyCallback)?.let {
+                    telephonyManager?.unregisterTelephonyCallback(it)
+                }
+            } else {
+                phoneStateListener?.let {
+                    @Suppress("DEPRECATION")
+                    telephonyManager?.listen(it, PhoneStateListener.LISTEN_NONE)
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private var wasMediaPlayingBeforeCall = false
+
+    private fun pausePhoneMediaForCall() {
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
+        try {
+            if (audioManager.isMusicActive) {
+                wasMediaPlayingBeforeCall = true
+                val downEvent = KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_PAUSE)
+                val upEvent = KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_PAUSE)
+                audioManager.dispatchMediaKeyEvent(downEvent)
+                audioManager.dispatchMediaKeyEvent(upEvent)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun resumePhoneMediaAfterCall() {
+        if (!wasMediaPlayingBeforeCall) return
+        wasMediaPlayingBeforeCall = false
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
+        try {
+            val downEvent = KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_PLAY)
+            val upEvent = KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_PLAY)
+            audioManager.dispatchMediaKeyEvent(downEvent)
+            audioManager.dispatchMediaKeyEvent(upEvent)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    fun applyCallAudioRoute(route: String) {
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
+        try {
+            audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val availableDevices = audioManager.availableCommunicationDevices
+                when (route) {
+                    "bluetooth" -> {
+                        val btDevice = availableDevices.find {
+                            it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+                            it.type == AudioDeviceInfo.TYPE_BLE_HEADSET ||
+                            it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP
+                        }
+                        if (btDevice != null) {
+                            audioManager.setCommunicationDevice(btDevice)
+                        } else {
+                            val speaker = availableDevices.find { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+                            if (speaker != null) audioManager.setCommunicationDevice(speaker)
+                        }
+                    }
+                    "phone" -> {
+                        val earpiece = availableDevices.find { it.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE }
+                        if (earpiece != null) {
+                            audioManager.setCommunicationDevice(earpiece)
+                        } else {
+                            audioManager.clearCommunicationDevice()
+                        }
+                        @Suppress("DEPRECATION")
+                        audioManager.isSpeakerphoneOn = false
+                    }
+                    else -> {
+                        val speaker = availableDevices.find { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+                        if (speaker != null) {
+                            audioManager.setCommunicationDevice(speaker)
+                        }
+                        @Suppress("DEPRECATION")
+                        audioManager.isSpeakerphoneOn = true
+                    }
+                }
+            } else {
+                when (route) {
+                    "phone" -> {
+                        @Suppress("DEPRECATION")
+                        audioManager.isSpeakerphoneOn = false
+                    }
+                    else -> {
+                        @Suppress("DEPRECATION")
+                        audioManager.isSpeakerphoneOn = true
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    fun handleCallStateTransition(state: Int, phoneNumber: String?) {
+        val stateStr = when (state) {
+            TelephonyManager.CALL_STATE_RINGING -> "ringing"
+            TelephonyManager.CALL_STATE_OFFHOOK -> "active"
+            TelephonyManager.CALL_STATE_IDLE -> "idle"
+            else -> "idle"
+        }
+
+        if (stateStr == "ringing" || stateStr == "active") {
+            pausePhoneMediaForCall()
+            if (stateStr == "active") {
+                applyCallAudioRoute("phone_speaker")
+            }
+        } else if (stateStr == "idle") {
+            resumePhoneMediaAfterCall()
+            val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                audioManager?.clearCommunicationDevice()
+            }
+            audioManager?.mode = AudioManager.MODE_NORMAL
+        }
+
+        val obj = org.json.JSONObject().apply {
+            put("type", "call_state_changed")
+            put("state", stateStr)
+            put("number", phoneNumber ?: "")
+            put("timestamp", System.currentTimeMillis())
+        }
+        sendRaw(obj.toString())
+
+        // When call terminates or transitions to idle, immediately push updated call history
+        if (stateStr == "idle") {
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                sendPhoneCallHistory()
+            }, 800)
+        }
+    }
+
+    private var callLogObserver: ContentObserver? = null
+    private var contactsObserver: ContentObserver? = null
+
+    private fun setupContentObservers() {
+        try {
+            val handler = android.os.Handler(android.os.Looper.getMainLooper())
+            if (callLogObserver == null) {
+                callLogObserver = object : ContentObserver(handler) {
+                    private var lastSync = 0L
+                    override fun onChange(selfChange: Boolean) {
+                        super.onChange(selfChange)
+                        val now = System.currentTimeMillis()
+                        if (now - lastSync > 1000) {
+                            lastSync = now
+                            sendPhoneCallHistory()
+                        }
+                    }
+                }
+                contentResolver.registerContentObserver(
+                    CallLog.Calls.CONTENT_URI,
+                    true,
+                    callLogObserver!!
+                )
+            }
+            if (contactsObserver == null) {
+                contactsObserver = object : ContentObserver(handler) {
+                    private var lastSync = 0L
+                    override fun onChange(selfChange: Boolean) {
+                        super.onChange(selfChange)
+                        val now = System.currentTimeMillis()
+                        if (now - lastSync > 2000) {
+                            lastSync = now
+                            sendPhoneContacts()
+                        }
+                    }
+                }
+                contentResolver.registerContentObserver(
+                    ContactsContract.Contacts.CONTENT_URI,
+                    true,
+                    contactsObserver!!
+                )
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun teardownContentObservers() {
+        try {
+            callLogObserver?.let { contentResolver.unregisterContentObserver(it) }
+            contactsObserver?.let { contentResolver.unregisterContentObserver(it) }
+            callLogObserver = null
+            contactsObserver = null
+        } catch (_: Exception) {}
+    }
+
+    fun refreshListeners() {
+        setupTelephonyListener()
+        setupContentObservers()
+    }
+
+
+    fun sendPhoneContacts() {
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            try {
+                val list = org.json.JSONArray()
+                val cr = contentResolver
+                val cursor = cr.query(
+                    ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                    arrayOf(
+                        ContactsContract.CommonDataKinds.Phone.CONTACT_ID,
+                        ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+                        ContactsContract.CommonDataKinds.Phone.NUMBER,
+                        ContactsContract.CommonDataKinds.Phone.TYPE
+                    ),
+                    null,
+                    null,
+                    ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " ASC"
+                )
+                cursor?.use { c ->
+                    val idCol = c.getColumnIndex(ContactsContract.CommonDataKinds.Phone.CONTACT_ID)
+                    val nameCol = c.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
+                    val numCol = c.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
+                    val typeCol = c.getColumnIndex(ContactsContract.CommonDataKinds.Phone.TYPE)
+                    val seenNumbers = HashSet<String>()
+                    while (c.moveToNext()) {
+                        val id = if (idCol >= 0) c.getString(idCol) else ""
+                        val name = if (nameCol >= 0) c.getString(nameCol) ?: "Unknown" else "Unknown"
+                        val num = if (numCol >= 0) c.getString(numCol) ?: "" else ""
+                        val clean = num.replace(Regex("[^0-9+]"), "")
+                        if (clean.isBlank() || seenNumbers.contains(clean)) continue
+                        seenNumbers.add(clean)
+                        val typeNum = if (typeCol >= 0) c.getInt(typeCol) else 2
+                        val typeStr = when (typeNum) {
+                            ContactsContract.CommonDataKinds.Phone.TYPE_MOBILE -> "Mobile"
+                            ContactsContract.CommonDataKinds.Phone.TYPE_HOME -> "Home"
+                            ContactsContract.CommonDataKinds.Phone.TYPE_WORK -> "Work"
+                            else -> "Main"
+                        }
+                        val item = org.json.JSONObject().apply {
+                            put("id", id)
+                            put("name", name)
+                            put("number", num)
+                            put("type", typeStr)
+                        }
+                        list.put(item)
+                    }
+                }
+                val resp = org.json.JSONObject().apply {
+                    put("type", "phone_contacts")
+                    put("contacts", list)
+                }
+                sendRaw(resp.toString())
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    fun sendPhoneCallHistory() {
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            try {
+                val list = org.json.JSONArray()
+                val cr = contentResolver
+                val cursor = cr.query(
+                    CallLog.Calls.CONTENT_URI,
+                    arrayOf(
+                        CallLog.Calls._ID,
+                        CallLog.Calls.NUMBER,
+                        CallLog.Calls.CACHED_NAME,
+                        CallLog.Calls.TYPE,
+                        CallLog.Calls.DATE,
+                        CallLog.Calls.DURATION
+                    ),
+                    null,
+                    null,
+                    CallLog.Calls.DATE + " DESC LIMIT 50"
+                )
+                cursor?.use { c ->
+                    val idCol = c.getColumnIndex(CallLog.Calls._ID)
+                    val numCol = c.getColumnIndex(CallLog.Calls.NUMBER)
+                    val nameCol = c.getColumnIndex(CallLog.Calls.CACHED_NAME)
+                    val typeCol = c.getColumnIndex(CallLog.Calls.TYPE)
+                    val dateCol = c.getColumnIndex(CallLog.Calls.DATE)
+                    val durCol = c.getColumnIndex(CallLog.Calls.DURATION)
+                    val sdf = java.text.SimpleDateFormat("hh:mm a", java.util.Locale.getDefault())
+                    while (c.moveToNext()) {
+                        val id = if (idCol >= 0) c.getString(idCol) else ""
+                        val num = if (numCol >= 0) c.getString(numCol) ?: "Private" else "Private"
+                        val name = if (nameCol >= 0) c.getString(nameCol) ?: num else num
+                        val typeVal = if (typeCol >= 0) c.getInt(typeCol) else CallLog.Calls.INCOMING_TYPE
+                        val typeStr = when (typeVal) {
+                            CallLog.Calls.OUTGOING_TYPE -> "outgoing"
+                            CallLog.Calls.MISSED_TYPE -> "missed"
+                            else -> "incoming"
+                        }
+                        val dateLong = if (dateCol >= 0) c.getLong(dateCol) else System.currentTimeMillis()
+                        val durSec = if (durCol >= 0) c.getLong(durCol) else 0L
+                        val durStr = if (durSec == 0L) "0s" else "${durSec / 60}m ${durSec % 60}s"
+                        val timeStr = sdf.format(java.util.Date(dateLong))
+                        val item = org.json.JSONObject().apply {
+                            put("id", "call_log_$id")
+                            put("phone_id", id)
+                            put("name", name)
+                            put("number", num)
+                            put("call_type", typeStr)
+                            put("time", timeStr)
+                            put("duration", durStr)
+                            put("timestamp", dateLong)
+                        }
+                        list.put(item)
+                    }
+                }
+                val resp = org.json.JSONObject().apply {
+                    put("type", "phone_call_history")
+                    put("calls", list)
+                }
+                sendRaw(resp.toString())
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    fun deleteCallLogEntry(recordId: String, number: String) {
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            try {
+                val cr = contentResolver
+                val cleanId = recordId.replace("call_log_", "")
+                if (cleanId.isNotBlank() && cleanId.all { it.isDigit() }) {
+                    cr.delete(CallLog.Calls.CONTENT_URI, "${CallLog.Calls._ID} = ?", arrayOf(cleanId))
+                } else if (number.isNotBlank()) {
+                    cr.delete(CallLog.Calls.CONTENT_URI, "${CallLog.Calls.NUMBER} = ?", arrayOf(number))
+                }
+                sendPhoneCallHistory()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    fun clearCallLogEntries() {
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            try {
+                contentResolver.delete(CallLog.Calls.CONTENT_URI, null, null)
+                sendPhoneCallHistory()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
     override fun onDestroy() {
         try {
             unregisterReceiver(packageChangeReceiver)
@@ -510,6 +1291,8 @@ class IdroidService : Service() {
         try {
             unregisterReceiver(bluetoothReceiver)
         } catch (_: Exception) {}
+        teardownContentObservers()
+        teardownTelephonyListener()
         tcpClient?.disconnect()
         instance = null
         super.onDestroy()

@@ -7,6 +7,7 @@ static MAC_APPS_CACHE: LazyLock<Mutex<Vec<MacAppEntry>>> = LazyLock::new(|| Mute
 
 static MAC_APP_ICON_BYTES: &[u8] = include_bytes!("../../bin/mac-app-icon");
 static MAC_MEDIA_KEY_BYTES: &[u8] = include_bytes!("../../bin/mac-media-key");
+static MAC_BT_HELPER_BYTES: &[u8] = include_bytes!("../../bin/mac-bt-helper");
 static IDROID_PROXY_SCRIPT: &str = include_str!("../../bin/idroid_proxy.py");
 
 pub fn invalidate_mac_apps_cache() {
@@ -30,6 +31,13 @@ pub fn ensure_helper_binaries() {
     if !std::path::Path::new(media_bin).exists() {
         if fs::write(media_bin, MAC_MEDIA_KEY_BYTES).is_ok() {
             let _ = fs::set_permissions(media_bin, fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    let bt_bin = "/tmp/mac-bt-helper";
+    if !std::path::Path::new(bt_bin).exists() {
+        if fs::write(bt_bin, MAC_BT_HELPER_BYTES).is_ok() {
+            let _ = fs::set_permissions(bt_bin, fs::Permissions::from_mode(0o755));
         }
     }
 

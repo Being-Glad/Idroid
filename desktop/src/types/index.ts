@@ -42,10 +42,27 @@ export interface FavouriteContact {
   name: string;
   number: string;
   avatarColor?: string;
+  contact_type?: string;
+}
+
+export interface PhoneContact {
+  id: string;
+  name: string;
+  number: string;
+  contact_type: string;
+}
+
+export interface CallStateInfo {
+  state: 'idle' | 'ringing' | 'active';
+  is_ringing: boolean;
+  is_active: boolean;
+  number: string;
+  name: string;
 }
 
 export interface CallRecord {
   id: string;
+  phone_id?: string;
   name: string;
   number: string;
   call_type: string;
@@ -72,6 +89,8 @@ export interface ClipboardSnippet {
   text: string;
   source: string;
   time: string;
+  pinned?: boolean;
+  image_base64?: string;
 }
 
 export interface QuickControlItem {

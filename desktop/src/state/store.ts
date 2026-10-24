@@ -287,7 +287,7 @@ export const initialStoreState: IdroidStoreState = {
       if (saved) return JSON.parse(saved);
     } catch (_) {}
     return [
-      { id: 'fav-1', name: 'Papa', number: '+91 98765 43210', avatarColor: '#ff6e32' },
+      { id: 'fav-1', name: 'Papa', number: '+91 98765 43210', avatarColor: '#38b6ff' },
       { id: 'fav-2', name: 'Maa', number: '+91 98765 12345', avatarColor: '#ff3b30' },
       { id: 'fav-3', name: 'Home', number: '+91 98111 22334', avatarColor: '#34c759' },
     ];

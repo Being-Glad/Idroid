@@ -7,6 +7,15 @@ pub static LIVE_NOTIFICATIONS: LazyLock<Mutex<Vec<NotificationRecord>>> = LazyLo
 pub static COMPANION_SESSION: LazyLock<Mutex<Option<CompanionSession>>> = LazyLock::new(|| Mutex::new(None));
 pub static QUICK_PHONE_APPS: LazyLock<Mutex<Vec<PhoneAppIconItem>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 pub static ACTIVE_SERVER_PORT: LazyLock<Mutex<u16>> = LazyLock::new(|| Mutex::new(53100));
+pub static CURRENT_CALL_STATE: LazyLock<Mutex<CallStateInfo>> = LazyLock::new(|| Mutex::new(CallStateInfo {
+    state: "idle".into(),
+    is_ringing: false,
+    is_active: false,
+    number: String::new(),
+    name: String::new(),
+}));
+pub static PHONE_CONTACTS_CACHE: LazyLock<Mutex<Vec<PhoneContact>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+pub static PHONE_CALL_HISTORY_CACHE: LazyLock<Mutex<Vec<CallRecord>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceTelemetry {
@@ -44,6 +53,8 @@ pub struct PairingPayload {
     pub port: u16,
     pub token: String,
     pub protocol: String,
+    #[serde(default)]
+    pub ssid: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +98,8 @@ pub struct PhotoItem {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CallRecord {
     pub id: String,
+    #[serde(default)]
+    pub phone_id: Option<String>,
     pub name: String,
     pub number: String,
     pub call_type: String, // incoming, outgoing, missed
@@ -112,10 +125,15 @@ pub struct ClipboardSnippet {
     pub text: String,
     pub source: String,
     pub time: String,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub image_base64: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompanionSession {
+    pub stream_id: u64,
     pub device_name: String,
     pub brand: String,
     pub battery: u8,
@@ -136,6 +154,20 @@ pub struct MacBluetoothStatus {
     pub is_connected: bool,
     pub connected_device_name: Option<String>,
     pub status_text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MacBluetoothDevice {
+    pub name: String,
+    pub address: String,
+    pub connected: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MacWifiInfo {
+    pub power: bool,
+    pub ssid: String,
+    pub interface: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -189,3 +221,51 @@ pub struct IncomingCallInfo {
     pub number: String,
     pub name: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CallStateInfo {
+    pub state: String, // "idle", "ringing", "active"
+    pub is_ringing: bool,
+    pub is_active: bool,
+    pub number: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhoneContact {
+    pub id: String,
+    pub name: String,
+    pub number: String,
+    pub contact_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhoneBluetoothDevice {
+    pub name: String,
+    pub address: String,
+    pub connected: bool,
+    pub bonded: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhoneBluetoothState {
+    pub enabled: bool,
+    pub connected_device: Option<String>,
+    pub devices: Vec<PhoneBluetoothDevice>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhoneWifiState {
+    pub enabled: bool,
+    pub ssid: Option<String>,
+    pub ip: Option<String>,
+    pub link_speed: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhoneHotspotState {
+    pub enabled: bool,
+    pub ip: Option<String>,
+    pub client_count: u32,
+}
+

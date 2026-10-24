@@ -22,6 +22,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -357,7 +358,7 @@ fun FluidMediaCapsule(
                     .clip(CircleShape)
                     .background(
                         Brush.linearGradient(
-                            listOf(SolarOrange, Color(0xFFFF8533))
+                            listOf(FinderBlueBright, FinderBlue)
                         )
                     )
                     .clickable(
@@ -498,5 +499,115 @@ fun FluidIconButton(
             tint = tint,
             modifier = Modifier.size(22.dp)
         )
+    }
+}
+
+/**
+ * FluidPrivacyMask - Tap-to-reveal capsule for IP addresses, ports, and hostnames.
+ * Keeps telemetry masked (e.g. 192.168.•••:••••) during screen share or demo,
+ * while allowing instant one-tap reveal and clipboard copy with haptic feedback.
+ */
+@Composable
+fun FluidPrivacyMask(
+    rawText: String,
+    modifier: Modifier = Modifier,
+    prefix: String? = null,
+    fontSize: androidx.compose.ui.unit.TextUnit = 11.5.sp,
+    color: Color = TextSecondary
+) {
+    var isRevealed by remember { mutableStateOf(false) }
+    var isCopied by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    val haptic = LocalHapticFeedback.current
+
+    val maskedText = remember(rawText) {
+        val parts = rawText.split(":")
+        val ipPart = parts.getOrNull(0) ?: rawText
+        val portPart = parts.getOrNull(1)
+
+        val ipOctets = ipPart.split(".")
+        val maskedIp = if (ipOctets.size == 4) {
+            "${ipOctets[0]}.${ipOctets[1]}.•••.•••"
+        } else {
+            "••••••••"
+        }
+        if (portPart != null) "$maskedIp:••••" else maskedIp
+    }
+
+    LaunchedEffect(isCopied) {
+        if (isCopied) {
+            kotlinx.coroutines.delay(1400)
+            isCopied = false
+        }
+    }
+
+    Surface(
+        color = when {
+            isCopied -> AndroidGreenBright.copy(alpha = 0.15f)
+            isRevealed -> FinderBlueBright.copy(alpha = 0.12f)
+            else -> Color.White.copy(alpha = 0.04f)
+        },
+        shape = RoundedCornerShape(6.dp),
+        border = androidx.compose.foundation.BorderStroke(
+            1.dp,
+            when {
+                isCopied -> AndroidGreenBright.copy(alpha = 0.6f)
+                isRevealed -> FinderBlueBright.copy(alpha = 0.45f)
+                else -> ObsidianBorder
+            }
+        ),
+        modifier = modifier
+            .clip(RoundedCornerShape(6.dp))
+            .clickable {
+                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                isRevealed = !isRevealed
+                if (isRevealed) {
+                    val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+                    val clip = android.content.ClipData.newPlainText("IP Telemetry", rawText)
+                    clipboard?.setPrimaryClip(clip)
+                    isCopied = true
+                    android.widget.Toast.makeText(context, "Copied $rawText to clipboard", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            }
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.5.dp)
+        ) {
+            if (!prefix.isNullOrBlank()) {
+                Text(
+                    text = prefix,
+                    fontSize = (fontSize.value - 1).sp,
+                    fontFamily = InterFontFamily,
+                    color = TextMuted
+                )
+            }
+            Text(
+                text = when {
+                    isCopied -> "Copied!"
+                    isRevealed -> rawText
+                    else -> maskedText
+                },
+                fontSize = fontSize,
+                fontFamily = InterFontFamily,
+                fontWeight = if (isRevealed || isCopied) FontWeight.SemiBold else FontWeight.Normal,
+                color = when {
+                    isCopied -> AndroidGreenBright
+                    isRevealed -> PureWhite
+                    else -> color
+                }
+            )
+            Icon(
+                imageVector = if (isRevealed) Icons.Default.Visibility else Icons.Default.VisibilityOff,
+                contentDescription = if (isRevealed) "Hide address" else "Reveal address",
+                tint = when {
+                    isCopied -> AndroidGreenBright
+                    isRevealed -> FinderBlueBright
+                    else -> TextMuted
+                },
+                modifier = Modifier.size(11.dp)
+            )
+        }
     }
 }

@@ -13,7 +13,7 @@ import {
   showAppLaunchHUD,
   attachTactileCardPhysics,
 } from './motionGraphics';
-import { getInvoke } from './services/tauri';
+import { getInvoke, getListen } from './services/tauri';
 
 import type {
   DeviceState,
@@ -24,6 +24,8 @@ import type {
   CallRecord,
   NotificationItem,
   ClipboardSnippet,
+  PhoneContact,
+  CallStateInfo,
 } from './types';
 
 // Active State - Dashboard is primary home overview
@@ -107,9 +109,9 @@ interface NavButtonDef {
 }
 
 const ALL_NAV_BUTTONS: NavButtonDef[] = [
-  { key: 'back', label: 'Back', icon: (s, c) => Icons.ArrowLeft(s, c), hint: 'Back (ESC / ◀)' },
-  { key: 'home', label: 'Home', icon: (s, c) => Icons.Dashboard(s, c), hint: 'Home Screen (⌂)' },
-  { key: 'recents', label: 'Recents', icon: (s, c) => Icons.Layers(s, c), hint: 'Recent Apps Switcher (▢)' },
+  { key: 'recents', label: 'Recents', icon: (s, c) => Icons.AndroidRecents(s, c), hint: 'Recent Apps Switcher (|||)' },
+  { key: 'home', label: 'Home', icon: (s, c) => Icons.AndroidHome(s, c), hint: 'Home Screen (○)' },
+  { key: 'back', label: 'Back', icon: (s, c) => Icons.AndroidBack(s, c), hint: 'Back (‹ / ESC)' },
   { key: 'notifications', label: 'Shade', icon: (s, c) => Icons.Bell(s, c), hint: 'Pull Down Notifications Shade' },
   { key: 'volume_down', label: 'Vol -', icon: (s, c) => Icons.Volume1(s, c), hint: 'Volume Down' },
   { key: 'volume_up', label: 'Vol +', icon: (s, c) => Icons.Volume2(s, c), hint: 'Volume Up' },
@@ -178,6 +180,35 @@ let isFavAppsMultiWindowActive: boolean = ((): boolean => {
 
 let isQuickControlsModalOpen = false;
 let quickControlsSearchQuery = '';
+let isMacBluetoothModalOpen = false;
+let isFetchingMacBtDevices = false;
+let macBluetoothDevices: { name: string; address: string; connected: boolean }[] = [];
+let isConnectingMacBtAddress = '';
+
+let isPhoneBluetoothModalOpen = false;
+let isFetchingPhoneBt = false;
+let phoneBluetoothState: {
+  enabled: boolean;
+  connected_device: string | null;
+  devices: { name: string; address: string; connected: boolean; bonded: boolean }[];
+} = { enabled: false, connected_device: null, devices: [] };
+
+let isPhoneWifiModalOpen = false;
+let isFetchingPhoneWifi = false;
+let phoneWifiState: {
+  enabled: boolean;
+  ssid: string | null;
+  ip: string | null;
+  link_speed: string | null;
+} = { enabled: false, ssid: null, ip: null, link_speed: null };
+
+let phoneLocationEnabled = false;
+let macLocationEnabled = false;
+let phoneHotspotState: {
+  enabled: boolean;
+  ip: string | null;
+  client_count: number;
+} = { enabled: false, ip: null, client_count: 0 };
 let quickControlsViewMode: 'tiles' | 'cards' = ((): 'tiles' | 'cards' => {
   try {
     const saved = localStorage.getItem('idroid_quick_controls_view');
@@ -425,6 +456,8 @@ let callHistory: CallRecord[] = ((): CallRecord[] => {
 })();
 let notificationList: NotificationItem[] = [];
 let clipboardHistory: ClipboardSnippet[] = [];
+let clipboardSearchQuery = '';
+let clipboardActiveFilter: 'all' | 'pinned' | 'mac' | 'phone' = 'all';
 
 let isLoadingApps = false;
 let isLoadingFiles = false;
@@ -445,12 +478,12 @@ let photoThumbnails: Map<string, string> = new Map();
 let activeLightboxPhoto: PhotoItem | null = null;
 
 // Calls, Audio Route & Favourite Contacts State
-let callAudioRoute: 'mac' | 'phone' = ((): 'mac' | 'phone' => {
+let callAudioRoute: 'mac' | 'phone_speaker' | 'phone' | 'bluetooth' = ((): 'mac' | 'phone_speaker' | 'phone' | 'bluetooth' => {
   try {
     const saved = localStorage.getItem('idroid_call_audio_route');
-    if (saved === 'phone' || saved === 'mac') return saved;
+    if (saved === 'phone' || saved === 'mac' || saved === 'phone_speaker' || saved === 'bluetooth') return saved;
   } catch (_) {}
-  return 'mac';
+  return 'phone_speaker';
 })();
 let favouriteContacts: FavouriteContact[] = ((): FavouriteContact[] => {
   try {
@@ -458,16 +491,91 @@ let favouriteContacts: FavouriteContact[] = ((): FavouriteContact[] => {
     if (saved) {
       const parsed = JSON.parse(saved);
       if (Array.isArray(parsed)) {
-        return parsed.filter((c: any) => !c.number?.includes('98765 4321'));
+        // Keep strictly user-saved favorites (identified by 'fav-' prefix or explicitly favorited)
+        const trueFavs = parsed.filter((c: any) => c.id && c.id.startsWith('fav-') && !c.number?.includes('98765 4321'));
+        if (trueFavs.length !== parsed.length) {
+          localStorage.setItem('idroid_favourite_contacts', JSON.stringify(trueFavs));
+        }
+        return trueFavs;
       }
     }
   } catch (_) {}
   return [];
 })();
+let phoneContacts: PhoneContact[] = ((): PhoneContact[] => {
+  try {
+    const saved = localStorage.getItem('idroid_synced_phone_contacts') || localStorage.getItem('idroid_phone_contacts');
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch (_) {}
+  return [];
+})();
+let lastContactsSyncTime = (() => {
+  try {
+    const t = localStorage.getItem('idroid_last_contacts_sync');
+    return t ? parseInt(t, 10) : 0;
+  } catch (_) { return 0; }
+})();
 let isAddFavouriteModalOpen = false;
+let editingContactId: string | null = null;
 let newFavName = '';
 let newFavNumber = '';
+let isSyncingContacts = false;
+let syncProgressPercentage = 0;
 let callsTabFilter: 'all' | 'missed' | 'outgoing' | 'incoming' = 'all';
+let callHistorySearchQuery = '';
+let isFloatingKeypadOpen = false;
+let isContactsDirectoryOpen = false;
+let contactsDirectorySearchQuery = '';
+
+// MARK: - Avatar & Identity Utilities for Calling Experience
+function getContactAvatarGradient(name: string, fallbackColor?: string): string {
+  const gradients = [
+    'linear-gradient(135deg, #6366f1 0%, #a855f7 100%)', // Indigo to Purple
+    'linear-gradient(135deg, #ec4899 0%, #f43f5e 100%)', // Pink to Rose
+    'linear-gradient(135deg, #06b6d4 0%, #3b82f6 100%)', // Cyan to Blue
+    'linear-gradient(135deg, #10b981 0%, #059669 100%)', // Emerald to Green
+    'linear-gradient(135deg, #38b6ff 0%, #007aff 100%)', // Finder Blue
+    'linear-gradient(135deg, #8b5cf6 0%, #d946ef 100%)', // Violet to Fuchsia
+    'linear-gradient(135deg, #14b8a6 0%, #0284c7 100%)', // Teal to Sky
+    'linear-gradient(135deg, #4ae38b 0%, #1eb05e 100%)', // Android Green
+    'linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%)', // Royal Blue
+    'linear-gradient(135deg, #84cc16 0%, #16a34a 100%)', // Lime to Green
+  ];
+  let hash = 0;
+  const str = (name || '').trim() || 'Contact';
+  for (let i = 0; i < str.length; i++) {
+    hash = str.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  const idx = Math.abs(hash) % gradients.length;
+  return gradients[idx];
+}
+
+function getContactInitials(name: string): string {
+  const clean = (name || '').trim();
+  if (!clean) return '#';
+  if (/^[\d+]/.test(clean)) {
+    return clean.replace(/[^0-9]/g, '').substring(0, 2) || '#';
+  }
+  const words = clean.split(/\s+/).filter(Boolean);
+  if (words.length >= 2) {
+    return (words[0][0] + words[1][0]).toUpperCase();
+  }
+  return clean.substring(0, Math.min(2, clean.length)).toUpperCase();
+}
+
+function formatShortName(name: string): string {
+  const clean = (name || '').trim();
+  if (!clean) return 'Unknown';
+  if (/^[\d+]/.test(clean)) {
+    return clean.length > 11 ? clean.substring(0, 9) + '…' : clean;
+  }
+  const words = clean.split(/\s+/).filter(Boolean);
+  const first = words[0];
+  return first.length > 10 ? first.substring(0, 9) + '…' : first;
+}
 
 // Seen notifications for desktop system notifications
 let seenNotificationIds: Set<string> = new Set();
@@ -480,6 +588,7 @@ interface PairingPayload {
   port: number;
   token: string;
   protocol: string;
+  ssid?: string;
 }
 
 let pairingPayload: PairingPayload = {
@@ -496,6 +605,46 @@ let isPairingQrLoading = false;
 let isCompanionInstalling = false;
 let companionInstallMsg = '';
 
+// MARK: - Privacy Mask Helper for IP and Port Telemetry
+function renderPrivacyMask(ip: string | undefined | null, port?: number | string, options?: { prefix?: string }): string {
+  if (!ip) return '<span style="color: var(--text-muted);">Ready</span>';
+  const fullAddress = (port !== undefined && port !== null && port !== '') ? `${ip}:${port}` : ip;
+  
+  const parts = ip.split('.');
+  let masked = ip;
+  if (parts.length === 4) {
+    masked = `${parts[0]}.${parts[1]}.•••.•••`;
+  } else {
+    masked = '••••••••';
+  }
+  if (port !== undefined && port !== null && port !== '') {
+    masked += ':••••';
+  }
+
+  const prefix = options?.prefix ? `<span style="color: var(--text-muted); font-size: 10px; margin-right: 2px;">${options.prefix}</span>` : '';
+
+  return `<span class="privacy-mask-pill" data-raw-val="${fullAddress}" title="Hover to view • Click to pin & copy">${prefix}<span class="mask-dots">${masked}</span><span class="mask-real">${fullAddress}</span><span class="mask-copied-notice">Copied!</span><span class="mask-icon">${Icons.Eye(12, 'currentColor')}</span></span>`;
+}
+
+function attachPrivacyMaskGlobalListener() {
+  document.addEventListener('click', (e) => {
+    const pill = (e.target as HTMLElement).closest('.privacy-mask-pill') as HTMLElement | null;
+    if (pill) {
+      e.stopPropagation();
+      pill.classList.toggle('revealed');
+      const rawVal = pill.getAttribute('data-raw-val');
+      if (rawVal) {
+        navigator.clipboard.writeText(rawVal).then(() => {
+          pill.classList.add('copied');
+          setTimeout(() => {
+            pill.classList.remove('copied');
+          }, 1400);
+        }).catch(() => {});
+      }
+    }
+  });
+}
+
 // Wireless & Remote Cross-Network Transport State
 let isWirelessModalOpen = false;
 let wirelessModalTab: 'optical' | 'handover' | 'pairing' | 'mesh' = 'optical';
@@ -509,43 +658,52 @@ let wirelessFormMeshPort = '5555';
 
 // Idroid Doctor & System Health State
 let isDoctorModalOpen = false;
+let isApkModalOpen = false;
 let doctorSearchQuery = '';
 let doctorExpandedFaq: string | null = 'hotspot_vs_wifi';
 
-async function generatePairingQRs() {
+async function generatePairingQRs(force: boolean = false) {
   if (isPairingQrLoading) return;
   isPairingQrLoading = true;
   try {
     const invoke = await getInvoke();
+    let ipChanged = false;
     if (invoke) {
       const livePayload = (await invoke('get_pairing_qr_payload')) as PairingPayload;
       if (livePayload) {
+        if (pairingPayload.ip !== livePayload.ip || pairingPayload.port !== livePayload.port || pairingPayload.name !== livePayload.name) {
+          ipChanged = true;
+        }
         pairingPayload = livePayload;
       }
     }
 
-    const pairUri = `idroid://pair?ip=${pairingPayload.ip}&port=${pairingPayload.port}&token=${pairingPayload.token}&name=${encodeURIComponent(pairingPayload.name)}`;
-    pairingQrSvg = await QRCode.toString(pairUri, {
-      type: 'svg',
-      margin: 1,
-      color: { dark: '#000000', light: '#ffffff' },
-      width: 196,
-    });
-
-    downloadQrSvg = await QRCode.toString(
-      'https://github.com/idroid/idroid/releases/latest/download/idroid-companion.apk',
-      {
+    if (ipChanged || force || !pairingQrSvg) {
+      const ssidParam = pairingPayload.ssid ? `&ssid=${encodeURIComponent(pairingPayload.ssid)}` : '';
+      const pairUri = `idroid://pair?ip=${pairingPayload.ip}&port=${pairingPayload.port}&token=${pairingPayload.token}&name=${encodeURIComponent(pairingPayload.name)}${ssidParam}`;
+      console.log('[Idroid Desktop] Generated dynamic pairing QR:', pairUri);
+      pairingQrSvg = await QRCode.toString(pairUri, {
         type: 'svg',
         margin: 1,
         color: { dark: '#000000', light: '#ffffff' },
-        width: 76,
-      }
-    );
+        width: 196,
+      });
+
+      downloadQrSvg = await QRCode.toString(
+        'https://github.com/idroid/idroid/releases/latest/download/idroid-companion.apk',
+        {
+          type: 'svg',
+          margin: 1,
+          color: { dark: '#000000', light: '#ffffff' },
+          width: 76,
+        }
+      );
+      render();
+    }
   } catch (err) {
     console.warn('Failed to generate pairing QR:', err);
   } finally {
     isPairingQrLoading = false;
-    render();
   }
 }
 
@@ -639,7 +797,7 @@ function renderQuickAppsHtml(): string {
     const cleanSrc = cleanIconUrl(app.icon);
     const iconHtml = cleanSrc
       ? `<img src="${cleanSrc}" style="width: 20px; height: 20px; border-radius: 6px; object-fit: contain;" />`
-      : `<div style="width: 20px; height: 20px; border-radius: 6px; background: rgba(255,110,50,0.15); display: flex; align-items: center; justify-content: center;">${Icons.Phone(14, 'var(--accent-solar)')}</div>`;
+      : `<div style="width: 20px; height: 20px; border-radius: 6px; background: rgba(56,182,255,0.15); display: flex; align-items: center; justify-content: center;">${Icons.Phone(14, 'var(--accent-solar)')}</div>`;
 
     return `
       <button class="btn-luxury btn-launch-app" data-package="${app.package}" data-appname="${app.name}" data-iconsrc="${cleanSrc}" style="padding: 9px 14px; font-size: 12.5px; border-radius: 12px; display: inline-flex; align-items: center; gap: 8px; flex-shrink: 0;">
@@ -650,7 +808,7 @@ function renderQuickAppsHtml(): string {
   }).join('');
 
   const addAppBtnHtml = `
-    <button class="btn-luxury btn-add-inline-app" id="btn-strip-add-app" style="padding: 9px 13px; font-size: 12px; border-radius: 12px; display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; border: 1.5px dashed rgba(255, 110, 50, 0.45); background: rgba(255, 110, 50, 0.05); color: var(--accent-solar); cursor: pointer; transition: all 0.2s ease;" title="Add or Customize Favourite Apps">
+    <button class="btn-luxury btn-add-inline-app" id="btn-strip-add-app" style="padding: 9px 13px; font-size: 12px; border-radius: 12px; display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; border: 1.5px dashed rgba(56, 182, 255, 0.45); background: rgba(56, 182, 255, 0.05); color: var(--accent-solar); cursor: pointer; transition: all 0.2s ease;" title="Add or Customize Favourite Apps">
       ${Icons.Plus(14, 'var(--accent-solar)')}
       <span style="font-weight: 600;">Add App</span>
     </button>
@@ -686,10 +844,10 @@ function renderQuickAppsModalGrid(): string {
     const cleanSrc = cleanIconUrl(app.icon);
     const iconHtml = cleanSrc
       ? `<img src="${cleanSrc}" style="width: 28px; height: 28px; border-radius: 7px; object-fit: contain; flex-shrink: 0;" />`
-      : `<div style="width: 28px; height: 28px; border-radius: 7px; background: rgba(255,110,50,0.15); display: flex; align-items: center; justify-content: center; flex-shrink: 0;">${Icons.Phone(16, 'var(--accent-solar)')}</div>`;
+      : `<div style="width: 28px; height: 28px; border-radius: 7px; background: rgba(56,182,255,0.15); display: flex; align-items: center; justify-content: center; flex-shrink: 0;">${Icons.Phone(16, 'var(--accent-solar)')}</div>`;
 
     return `
-      <div class="custom-app-item ${isPinned ? 'pinned' : ''}" data-pkg="${app.package}" style="display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-radius: 12px; background: ${isPinned ? 'rgba(255, 110, 50, 0.08)' : 'rgba(255, 255, 255, 0.03)'}; border: 1px solid ${isPinned ? 'rgba(255, 110, 50, 0.35)' : 'var(--border-subtle)'}; cursor: pointer; transition: all 0.15s ease;">
+      <div class="custom-app-item ${isPinned ? 'pinned' : ''}" data-pkg="${app.package}" style="display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-radius: 12px; background: ${isPinned ? 'rgba(56, 182, 255, 0.08)' : 'rgba(255, 255, 255, 0.03)'}; border: 1px solid ${isPinned ? 'rgba(56, 182, 255, 0.35)' : 'var(--border-subtle)'}; cursor: pointer; transition: all 0.15s ease;">
         <div style="display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1;">
           ${iconHtml}
           <div style="min-width: 0; flex: 1;">
@@ -699,7 +857,7 @@ function renderQuickAppsModalGrid(): string {
         <div style="flex-shrink: 0; margin-left: 8px;">
           ${
             isPinned
-              ? `<span style="display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; color: var(--accent-solar); background: rgba(255, 110, 50, 0.15); padding: 3px 8px; border-radius: 6px;">✓ Pinned</span>`
+              ? `<span style="display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; color: var(--accent-solar); background: rgba(56, 182, 255, 0.15); padding: 3px 8px; border-radius: 6px;">✓ Pinned</span>`
               : `<span style="display: inline-flex; align-items: center; font-size: 11px; color: var(--text-muted); background: rgba(255, 255, 255, 0.04); padding: 3px 8px; border-radius: 6px;">+ Pin</span>`
           }
         </div>
@@ -720,7 +878,7 @@ function renderQuickAppsModal(): string {
         <!-- Modal Header -->
         <div style="padding: 18px 22px; border-bottom: 1px solid var(--border-subtle); display: flex; align-items: center; justify-content: space-between;">
           <div style="display: flex; align-items: center; gap: 12px;">
-            <div style="width: 36px; height: 36px; border-radius: 10px; background: rgba(255, 110, 50, 0.15); color: var(--accent-solar); display: flex; align-items: center; justify-content: center;">
+            <div style="width: 36px; height: 36px; border-radius: 10px; background: rgba(56, 182, 255, 0.15); color: var(--accent-solar); display: flex; align-items: center; justify-content: center;">
               ${Icons.Sliders(18, 'currentColor')}
             </div>
             <div>
@@ -751,9 +909,9 @@ function renderQuickAppsModal(): string {
         </div>
 
         <!-- Multi-Window Concurrent Mode Option -->
-        <div style="margin: 12px 22px 4px 22px; padding: 11px 14px; border-radius: 12px; background: rgba(255, 110, 50, 0.08); border: 1px solid rgba(255, 110, 50, 0.25); display: flex; align-items: center; justify-content: space-between; gap: 14px;">
+        <div style="margin: 12px 22px 4px 22px; padding: 11px 14px; border-radius: 12px; background: rgba(56, 182, 255, 0.08); border: 1px solid rgba(56, 182, 255, 0.25); display: flex; align-items: center; justify-content: space-between; gap: 14px;">
           <div style="display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1;">
-            <div style="width: 32px; height: 32px; border-radius: 8px; background: rgba(255, 110, 50, 0.16); color: var(--accent-solar); display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
+            <div style="width: 32px; height: 32px; border-radius: 8px; background: rgba(56, 182, 255, 0.16); color: var(--accent-solar); display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
               ${Icons.Layers(16, 'currentColor')}
             </div>
             <div>
@@ -935,7 +1093,7 @@ const AVAILABLE_QUICK_CONTROLS: QuickControlDef[] = [
     desc: 'Instantly capture phone display screenshot to clipboard and Mac downloads.',
     badge: 'Capture',
     iconFn: (s, c) => Icons.Camera(s, c),
-    accentColor: '#fbbf24',
+    accentColor: '#38b6ff',
     category: 'media',
     actionName: 'Capture Screen',
   },
@@ -975,7 +1133,7 @@ const AVAILABLE_QUICK_CONTROLS: QuickControlDef[] = [
     desc: 'Minimize foreground apps and immediately navigate phone to home screen.',
     badge: 'Navigation',
     iconFn: (s, c) => Icons.Home(s, c),
-    accentColor: '#f59e0b',
+    accentColor: '#4ae38b',
     category: 'system',
     actionName: 'Go Home',
   },
@@ -1045,7 +1203,7 @@ const AVAILABLE_QUICK_CONTROLS: QuickControlDef[] = [
     desc: 'Wake device display and trigger screen backlight to locate misplaced phone.',
     badge: 'Find Device',
     iconFn: (s, c) => Icons.Phone(s, c),
-    accentColor: '#f97316',
+    accentColor: '#38b6ff',
     category: 'system',
     actionName: 'Wake Screen',
   },
@@ -1072,12 +1230,52 @@ const AVAILABLE_QUICK_CONTROLS: QuickControlDef[] = [
   {
     id: 'phone_bluetooth',
     name: 'Phone Bluetooth',
-    desc: 'View connected Bluetooth buds, smartwatch, or open Android Bluetooth settings.',
+    desc: 'View connected Bluetooth buds, audio accessories, and toggle phone Bluetooth without opening settings on phone.',
     badge: 'Android BT',
     iconFn: (s, c) => Icons.BluetoothConnected(s, c),
     accentColor: '#34d399',
     category: 'connectivity',
-    actionName: 'Phone Bluetooth',
+    actionName: 'Phone BT',
+  },
+  {
+    id: 'phone_wifi',
+    name: 'Phone Wi-Fi',
+    desc: 'Inspect connected Wi-Fi network, IP address, and toggle phone Wi-Fi power directly from Mac.',
+    badge: 'Android Wi-Fi',
+    iconFn: (s, c) => Icons.Wifi(s, c),
+    accentColor: '#38bdf8',
+    category: 'connectivity',
+    actionName: 'Phone Wi-Fi',
+  },
+  {
+    id: 'mac_location',
+    name: 'Mac Location Services',
+    desc: '1-click toggle macOS Location Services with native Touch ID / password prompt.',
+    badge: 'macOS GPS',
+    iconFn: (s, c) => Icons.Navigation(s, c),
+    accentColor: '#10b981',
+    category: 'system',
+    actionName: 'Mac Location',
+  },
+  {
+    id: 'phone_location',
+    name: 'Phone Location (GPS)',
+    desc: '1-click toggle phone GPS location on and off without opening settings on phone.',
+    badge: 'Hardware GPS',
+    iconFn: (s, c) => Icons.Navigation(s, c),
+    accentColor: '#4ae38b',
+    category: 'system',
+    actionName: 'Toggle GPS',
+  },
+  {
+    id: 'phone_hotspot',
+    name: 'Personal Hotspot',
+    desc: 'Inspect mobile tethering status, shared gateway IP, and connected clients.',
+    badge: 'Hotspot',
+    iconFn: (s, c) => Icons.Radio(s, c),
+    accentColor: '#38b6ff',
+    category: 'connectivity',
+    actionName: 'Phone Hotspot',
   },
 ];
 
@@ -1200,14 +1398,22 @@ async function executeQuickControl(id: string) {
       render();
       break;
     case 'mac_bluetooth':
-      if (invoke) {
-        await invoke('open_mac_bluetooth_settings');
-      }
+      await openMacBluetoothModal();
       break;
     case 'phone_bluetooth':
-      if (invoke) {
-        await invoke('send_phone_key', { key: 'phone_bluetooth' });
-      }
+      await openPhoneBluetoothModal();
+      break;
+    case 'phone_wifi':
+      await openPhoneWifiModal();
+      break;
+    case 'mac_location':
+      await toggleMacLocation();
+      break;
+    case 'phone_location':
+      await togglePhoneLocation();
+      break;
+    case 'phone_hotspot':
+      await openPhoneWifiModal();
       break;
     case 'ring':
       if (invoke) {
@@ -1248,7 +1454,7 @@ function renderQuickControlsSection(): string {
         
         <!-- Inline Aesthetic Plus Add Control Button -->
         <button class="qc-interactive-btn btn-add-qc btn-add-inline-qc" id="btn-deck-add-qc" type="button" data-tooltip="Add or customize quick controls in your deck" title="Add or customize quick controls">
-          <div class="qc-btn-icon" style="background: rgba(255, 110, 50, 0.15); color: var(--accent-solar);">
+          <div class="qc-btn-icon" style="background: rgba(56, 182, 255, 0.15); color: var(--accent-solar);">
             ${Icons.Plus(14, 'var(--accent-solar)')}
           </div>
           <span class="qc-btn-label">Add Control</span>
@@ -1294,8 +1500,8 @@ function renderQuickControlsSection(): string {
           .join('')}
 
         <!-- Inline Aesthetic Plus Add Control Card -->
-        <div class="glass-card btn-add-inline-qc" id="btn-deck-add-qc-card" style="padding: 18px; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 10px; border: 1.5px dashed rgba(255, 110, 50, 0.4); background: rgba(255, 110, 50, 0.04); cursor: pointer; min-height: 120px; transition: all 0.2s ease;" title="Add or Customize Quick Controls">
-          <div style="width: 38px; height: 38px; border-radius: 10px; background: rgba(255, 110, 50, 0.12); border: 1px solid rgba(255, 110, 50, 0.3); display: flex; align-items: center; justify-content: center; color: var(--accent-solar);">
+        <div class="glass-card btn-add-inline-qc" id="btn-deck-add-qc-card" style="padding: 18px; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 10px; border: 1.5px dashed rgba(56, 182, 255, 0.4); background: rgba(56, 182, 255, 0.04); cursor: pointer; min-height: 120px; transition: all 0.2s ease;" title="Add or Customize Quick Controls">
+          <div style="width: 38px; height: 38px; border-radius: 10px; background: rgba(56, 182, 255, 0.12); border: 1px solid rgba(56, 182, 255, 0.3); display: flex; align-items: center; justify-content: center; color: var(--accent-solar);">
             ${Icons.Plus(18, 'var(--accent-solar)')}
           </div>
           <div style="text-align: center;">
@@ -1366,7 +1572,7 @@ function renderQuickControlsModalGrid(): string {
     .map((c) => {
       const isPinned = pinned.includes(c.id);
       return `
-        <div class="glass-card" style="padding: 14px; display: flex; flex-direction: column; justify-content: space-between; gap: 12px; border-color: ${isPinned ? 'rgba(255, 110, 50, 0.35)' : 'var(--border-subtle)'}; background: ${isPinned ? 'rgba(255, 110, 50, 0.04)' : 'var(--surface-card)'};">
+        <div class="glass-card" style="padding: 14px; display: flex; flex-direction: column; justify-content: space-between; gap: 12px; border-color: ${isPinned ? 'rgba(56, 182, 255, 0.35)' : 'var(--border-subtle)'}; background: ${isPinned ? 'rgba(56, 182, 255, 0.04)' : 'var(--surface-card)'};">
           <div style="display: flex; gap: 12px; align-items: flex-start;">
             <div class="quick-control-icon-box" style="background: ${c.accentColor}18; color: ${c.accentColor}; border-color: ${c.accentColor}33;">
               ${c.iconFn(20, 'currentColor')}
@@ -1405,7 +1611,7 @@ function renderQuickControlsModal(): string {
         <!-- Modal Header -->
         <div style="padding: 18px 22px; border-bottom: 1px solid var(--border-subtle); display: flex; justify-content: space-between; align-items: center; background: rgba(255, 255, 255, 0.02);">
           <div style="display: flex; align-items: center; gap: 10px;">
-            <div style="width: 32px; height: 32px; border-radius: 8px; background: rgba(255, 110, 50, 0.12); display: flex; align-items: center; justify-content: center; color: var(--accent-solar);">
+            <div style="width: 32px; height: 32px; border-radius: 8px; background: rgba(56, 182, 255, 0.12); display: flex; align-items: center; justify-content: center; color: var(--accent-solar);">
               ${Icons.Dashboard(16, 'currentColor')}
             </div>
             <div>
@@ -1456,6 +1662,430 @@ function renderQuickControlsModal(): string {
   `;
 }
 
+async function openMacBluetoothModal() {
+  isMacBluetoothModalOpen = true;
+  isFetchingMacBtDevices = true;
+  render();
+  try {
+    const invoke = await getInvoke();
+    if (invoke) {
+      const devs = (await invoke('get_mac_bluetooth_devices')) as any[];
+      macBluetoothDevices = devs || [];
+    }
+  } catch (e) {
+    console.error('Failed to get Mac bluetooth devices:', e);
+  } finally {
+    isFetchingMacBtDevices = false;
+    render();
+  }
+}
+
+async function connectMacBtDevice(address: string) {
+  isConnectingMacBtAddress = address;
+  render();
+  try {
+    const invoke = await getInvoke();
+    if (invoke) {
+      await invoke('connect_mac_bluetooth_device', { address });
+      const devs = (await invoke('get_mac_bluetooth_devices')) as any[];
+      macBluetoothDevices = devs || [];
+      const host = (await invoke('get_host_telemetry')) as any;
+      if (host) {
+        hostTelemetry.bluetooth_status = host.bluetooth_status;
+        hostTelemetry.bluetooth_connected = host.bluetooth_connected;
+      }
+    }
+  } catch (e) {
+    console.error('Failed to connect:', e);
+  } finally {
+    isConnectingMacBtAddress = '';
+    render();
+  }
+}
+
+async function disconnectMacBtDevice(address: string) {
+  isConnectingMacBtAddress = address;
+  render();
+  try {
+    const invoke = await getInvoke();
+    if (invoke) {
+      await invoke('disconnect_mac_bluetooth_device', { address });
+      const devs = (await invoke('get_mac_bluetooth_devices')) as any[];
+      macBluetoothDevices = devs || [];
+      const host = (await invoke('get_host_telemetry')) as any;
+      if (host) {
+        hostTelemetry.bluetooth_status = host.bluetooth_status;
+        hostTelemetry.bluetooth_connected = host.bluetooth_connected;
+      }
+    }
+  } catch (e) {
+    console.error('Failed to disconnect:', e);
+  } finally {
+    isConnectingMacBtAddress = '';
+    render();
+  }
+}
+
+function renderMacBluetoothModal(): string {
+  if (!isMacBluetoothModalOpen) return '';
+
+  const devicesHtml = macBluetoothDevices.length > 0
+    ? macBluetoothDevices.map(dev => {
+        const isConnecting = isConnectingMacBtAddress === dev.address;
+        const isAudio = /buds|airpods|headset|audio|headphones|noise|oneplus/i.test(dev.name);
+        return `
+          <div style="display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; border-radius: 12px; background: ${dev.connected ? 'rgba(52, 211, 153, 0.08)' : 'rgba(255, 255, 255, 0.03)'}; border: 1px solid ${dev.connected ? 'rgba(52, 211, 153, 0.3)' : 'var(--border-subtle)'};">
+            <div style="display: flex; align-items: center; gap: 12px;">
+              <div style="width: 34px; height: 34px; border-radius: 50%; background: ${dev.connected ? 'rgba(52, 211, 153, 0.15)' : 'rgba(255, 255, 255, 0.05)'}; display: flex; align-items: center; justify-content: center; font-size: 16px;">
+                ${isAudio ? '🎧' : '📡'}
+              </div>
+              <div>
+                <div style="font-size: 13.5px; font-weight: 600; color: #fff;">${dev.name}</div>
+                <div style="display: flex; align-items: center; gap: 6px; font-size: 11px; color: ${dev.connected ? '#34d399' : '#64748b'};">
+                  <span style="width: 6px; height: 6px; border-radius: 50%; background: ${dev.connected ? '#34d399' : '#64748b'};"></span>
+                  ${dev.connected ? 'Connected to Mac' : 'Not Connected'}
+                </div>
+              </div>
+            </div>
+            <div>
+              ${isConnecting ? `
+                <div style="font-size: 11.5px; color: #38b6ff; font-weight: 600; padding: 6px 12px;">Connecting...</div>
+              ` : dev.connected ? `
+                <button class="btn-disconnect-mac-bt" data-addr="${dev.address}" style="padding: 6px 14px; font-size: 11.5px; font-weight: 600; border-radius: 8px; border: 1px solid rgba(239, 68, 68, 0.3); background: rgba(239, 68, 68, 0.1); color: #ef4444; cursor: pointer; transition: all 0.2s;">
+                  Disconnect
+                </button>
+              ` : `
+                <button class="btn-connect-mac-bt" data-addr="${dev.address}" style="padding: 6px 16px; font-size: 11.5px; font-weight: 600; border-radius: 8px; border: none; background: #10b981; color: #fff; cursor: pointer; transition: all 0.2s;">
+                  Connect
+                </button>
+              `}
+            </div>
+          </div>
+        `;
+      }).join('')
+    : isFetchingMacBtDevices
+      ? `<div style="text-align: center; padding: 28px; color: #94a3b8; font-size: 13px;">Scanning Mac paired accessories...</div>`
+      : `<div style="text-align: center; padding: 28px; color: #64748b; font-size: 13px;">No paired Bluetooth accessories found on this Mac.<br><span style="font-size: 11px;">Pair accessories in macOS once to manage them here.</span></div>`;
+
+  return `
+    <div id="mac-bt-modal-backdrop" style="position: fixed; inset: 0; background: rgba(0, 0, 0, 0.72); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); z-index: 9999; display: flex; align-items: center; justify-content: center; padding: 24px;">
+      <div class="modal-window glass-card" style="width: 100%; max-width: 500px; border: 1px solid var(--border-medium); border-radius: 20px; background: #121316; box-shadow: 0 24px 48px rgba(0,0,0,0.6); overflow: hidden; display: flex; flex-direction: column;">
+        <!-- Header -->
+        <div style="padding: 16px 20px; border-bottom: 1px solid var(--border-subtle); display: flex; align-items: center; justify-content: space-between;">
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <div style="width: 32px; height: 32px; border-radius: 50%; background: rgba(56, 189, 248, 0.15); display: flex; align-items: center; justify-content: center; color: #38bdf8;">
+              ${Icons.Bluetooth(16, '#38bdf8')}
+            </div>
+            <div>
+              <div style="font-size: 15px; font-weight: 700; color: #fff;">Mac Bluetooth Accessories</div>
+              <div style="font-size: 11.5px; color: #94a3b8;">1-click connect or disconnect accessories on this Mac</div>
+            </div>
+          </div>
+          <button id="btn-close-mac-bt-modal" class="btn-icon" style="width: 28px; height: 28px; border-radius: 50%; border: 1px solid var(--border-subtle); background: rgba(255,255,255,0.06); color: #fff; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 13px;">✕</button>
+        </div>
+
+        <!-- Devices List -->
+        <div style="padding: 16px 20px; max-height: 340px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px;">
+          ${devicesHtml}
+        </div>
+
+        <!-- Footer -->
+        <div style="padding: 12px 20px; border-top: 1px solid var(--border-subtle); display: flex; align-items: center; justify-content: space-between; background: rgba(255,255,255,0.02); font-size: 11.5px;">
+          <button id="btn-refresh-mac-bt" style="background: transparent; border: none; color: #38bdf8; cursor: pointer; display: flex; align-items: center; gap: 5px; font-weight: 500;">
+            ↻ Refresh Devices
+          </button>
+          <button id="btn-open-sys-bt-settings" style="background: transparent; border: none; color: #64748b; cursor: pointer; text-decoration: underline;">
+            Pair new device in macOS...
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+async function fetchPhoneHardwareStates() {
+  try {
+    const invoke = await getInvoke();
+    if (!invoke) return;
+    const btState = (await invoke('get_phone_bluetooth_state')) as any;
+    if (btState) phoneBluetoothState = btState;
+    const wifiState = (await invoke('get_phone_wifi_state')) as any;
+    if (wifiState) phoneWifiState = wifiState;
+    const locState = (await invoke('get_phone_location_state')) as boolean;
+    phoneLocationEnabled = !!locState;
+    try {
+      const macLoc = (await invoke('get_mac_location_services_state')) as boolean;
+      macLocationEnabled = !!macLoc;
+    } catch (_) {}
+    const hsState = (await invoke('get_phone_hotspot_state')) as any;
+    if (hsState) phoneHotspotState = hsState;
+  } catch (_) {}
+}
+
+async function openPhoneBluetoothModal() {
+  isPhoneBluetoothModalOpen = true;
+  isFetchingPhoneBt = true;
+  render();
+  try {
+    const invoke = await getInvoke();
+    if (invoke) {
+      const btState = (await invoke('get_phone_bluetooth_state')) as any;
+      if (btState) phoneBluetoothState = btState;
+    }
+  } catch (e) {
+    console.error('Failed to get phone bluetooth state:', e);
+  } finally {
+    isFetchingPhoneBt = false;
+    render();
+  }
+}
+
+async function togglePhoneBluetooth(enable: boolean) {
+  try {
+    const invoke = await getInvoke();
+    if (invoke) {
+      await invoke('toggle_phone_bluetooth', { enable });
+      phoneBluetoothState.enabled = enable;
+      const btState = (await invoke('get_phone_bluetooth_state')) as any;
+      if (btState) phoneBluetoothState = btState;
+    }
+  } catch (e) {
+    console.error('Failed to toggle phone bluetooth:', e);
+  } finally {
+    render();
+  }
+}
+
+async function openPhoneWifiModal() {
+  isPhoneWifiModalOpen = true;
+  isFetchingPhoneWifi = true;
+  render();
+  try {
+    const invoke = await getInvoke();
+    if (invoke) {
+      const wifiState = (await invoke('get_phone_wifi_state')) as any;
+      if (wifiState) phoneWifiState = wifiState;
+      const hsState = (await invoke('get_phone_hotspot_state')) as any;
+      if (hsState) phoneHotspotState = hsState;
+    }
+  } catch (e) {
+    console.error('Failed to get phone wifi state:', e);
+  } finally {
+    isFetchingPhoneWifi = false;
+    render();
+  }
+}
+
+async function togglePhoneWifi(enable: boolean) {
+  try {
+    const invoke = await getInvoke();
+    if (invoke) {
+      await invoke('toggle_phone_wifi', { enable });
+      phoneWifiState.enabled = enable;
+      const wifiState = (await invoke('get_phone_wifi_state')) as any;
+      if (wifiState) phoneWifiState = wifiState;
+    }
+  } catch (e) {
+    console.error('Failed to toggle phone wifi:', e);
+  } finally {
+    render();
+  }
+}
+
+async function togglePhoneLocation() {
+  const next = !phoneLocationEnabled;
+  phoneLocationEnabled = next;
+  render();
+  try {
+    const invoke = await getInvoke();
+    if (invoke) {
+      await invoke('toggle_phone_location', { enable: next });
+      const locState = (await invoke('get_phone_location_state')) as boolean;
+      phoneLocationEnabled = !!locState;
+    }
+  } catch (e) {
+    console.error('Failed to toggle phone location:', e);
+  } finally {
+    render();
+  }
+}
+
+async function toggleMacLocation() {
+  const next = !macLocationEnabled;
+  macLocationEnabled = next;
+  render();
+  try {
+    const invoke = await getInvoke();
+    if (invoke) {
+      const res = (await invoke('toggle_mac_location_services', { enable: next })) as boolean;
+      macLocationEnabled = !!res;
+    }
+  } catch (e) {
+    console.error('Failed to toggle Mac location:', e);
+  } finally {
+    render();
+  }
+}
+
+function renderPhoneBluetoothModal(): string {
+  if (!isPhoneBluetoothModalOpen) return '';
+
+  const devicesHtml = phoneBluetoothState.devices.length > 0
+    ? phoneBluetoothState.devices.map(dev => {
+        const isAudio = /buds|airpods|headset|audio|headphones|noise|oneplus|speaker|kilburn/i.test(dev.name);
+        return `
+          <div style="display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; border-radius: 12px; background: ${dev.connected ? 'rgba(52, 211, 153, 0.08)' : 'rgba(255, 255, 255, 0.03)'}; border: 1px solid ${dev.connected ? 'rgba(52, 211, 153, 0.3)' : 'var(--border-subtle)'};">
+            <div style="display: flex; align-items: center; gap: 12px;">
+              <div style="width: 34px; height: 34px; border-radius: 50%; background: ${dev.connected ? 'rgba(52, 211, 153, 0.15)' : 'rgba(255, 255, 255, 0.05)'}; display: flex; align-items: center; justify-content: center; font-size: 16px;">
+                ${isAudio ? '🎧' : '📡'}
+              </div>
+              <div>
+                <div style="font-size: 13.5px; font-weight: 600; color: #fff;">${dev.name}</div>
+                <div style="display: flex; align-items: center; gap: 6px; font-size: 11px; color: ${dev.connected ? '#34d399' : '#64748b'};">
+                  <span style="width: 6px; height: 6px; border-radius: 50%; background: ${dev.connected ? '#34d399' : '#64748b'};"></span>
+                  ${dev.connected ? 'Connected to Phone' : 'Paired Device'}
+                </div>
+              </div>
+            </div>
+            <div>
+              <span style="font-size: 11px; color: ${dev.connected ? '#34d399' : '#94a3b8'}; background: rgba(255,255,255,0.04); padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border-subtle);">
+                ${dev.connected ? 'Active Audio' : 'Paired'}
+              </span>
+            </div>
+          </div>
+        `;
+      }).join('')
+    : isFetchingPhoneBt
+      ? `<div style="text-align: center; padding: 28px; color: #94a3b8; font-size: 13px;">Querying phone Bluetooth accessories...</div>`
+      : `<div style="text-align: center; padding: 28px; color: #64748b; font-size: 13px;">No paired Bluetooth accessories found on this phone.</div>`;
+
+  return `
+    <div id="phone-bt-modal-backdrop" style="position: fixed; inset: 0; background: rgba(0, 0, 0, 0.72); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); z-index: 9999; display: flex; align-items: center; justify-content: center; padding: 24px;">
+      <div class="modal-window glass-card" style="width: 100%; max-width: 500px; border: 1px solid var(--border-medium); border-radius: 20px; background: #121316; box-shadow: 0 24px 48px rgba(0,0,0,0.6); overflow: hidden; display: flex; flex-direction: column;">
+        <!-- Header -->
+        <div style="padding: 16px 20px; border-bottom: 1px solid var(--border-subtle); display: flex; align-items: center; justify-content: space-between;">
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <div style="width: 32px; height: 32px; border-radius: 50%; background: rgba(52, 211, 153, 0.15); display: flex; align-items: center; justify-content: center; color: #34d399;">
+              ${Icons.Bluetooth(16, '#34d399')}
+            </div>
+            <div>
+              <div style="font-size: 15px; font-weight: 700; color: #fff;">Phone Bluetooth & Accessories</div>
+              <div style="font-size: 11.5px; color: #94a3b8;">Manage wireless earbuds & accessories without touching your phone</div>
+            </div>
+          </div>
+          <button id="btn-close-phone-bt-modal" class="btn-icon" style="width: 28px; height: 28px; border-radius: 50%; border: 1px solid var(--border-subtle); background: rgba(255,255,255,0.06); color: #fff; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 13px;">✕</button>
+        </div>
+
+        <!-- Master Power Toggle Row -->
+        <div style="padding: 14px 20px; background: rgba(255, 255, 255, 0.02); border-bottom: 1px solid var(--border-subtle); display: flex; align-items: center; justify-content: space-between;">
+          <div>
+            <div style="font-size: 13px; font-weight: 600; color: #fff;">Bluetooth Radio</div>
+            <div style="font-size: 11px; color: #64748b;">${phoneBluetoothState.enabled ? 'Phone Bluetooth is active and discoverable' : 'Bluetooth is currently powered off'}</div>
+          </div>
+          <button id="btn-toggle-phone-bt-power" style="padding: 6px 16px; font-size: 12px; font-weight: 600; border-radius: 8px; border: none; background: ${phoneBluetoothState.enabled ? '#10b981' : 'rgba(255,255,255,0.1)'}; color: #fff; cursor: pointer; transition: all 0.2s;">
+            ${phoneBluetoothState.enabled ? 'Turn OFF' : 'Turn ON'}
+          </button>
+        </div>
+
+        <!-- Devices List -->
+        <div style="padding: 16px 20px; max-height: 320px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px;">
+          ${devicesHtml}
+        </div>
+
+        <!-- Footer -->
+        <div style="padding: 12px 20px; border-top: 1px solid var(--border-subtle); display: flex; align-items: center; justify-content: space-between; background: rgba(255,255,255,0.02); font-size: 11.5px;">
+          <button id="btn-refresh-phone-bt" style="background: transparent; border: none; color: #34d399; cursor: pointer; display: flex; align-items: center; gap: 5px; font-weight: 500;">
+            ↻ Refresh Accessories
+          </button>
+          <span style="color: #64748b; font-size: 11px;">0 screen wakeups on phone</span>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderPhoneWifiModal(): string {
+  if (!isPhoneWifiModalOpen) return '';
+
+  return `
+    <div id="phone-wifi-modal-backdrop" style="position: fixed; inset: 0; background: rgba(0, 0, 0, 0.72); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); z-index: 9999; display: flex; align-items: center; justify-content: center; padding: 24px;">
+      <div class="modal-window glass-card" style="width: 100%; max-width: 500px; border: 1px solid var(--border-medium); border-radius: 20px; background: #121316; box-shadow: 0 24px 48px rgba(0,0,0,0.6); overflow: hidden; display: flex; flex-direction: column;">
+        <!-- Header -->
+        <div style="padding: 16px 20px; border-bottom: 1px solid var(--border-subtle); display: flex; align-items: center; justify-content: space-between;">
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <div style="width: 32px; height: 32px; border-radius: 50%; background: rgba(56, 189, 248, 0.15); display: flex; align-items: center; justify-content: center; color: #38bdf8;">
+              ${Icons.Wifi(16, '#38bdf8')}
+            </div>
+            <div>
+              <div style="font-size: 15px; font-weight: 700; color: #fff;">Phone Wi-Fi & Hotspot</div>
+              <div style="font-size: 11.5px; color: #94a3b8;">Manage phone network interfaces from your Mac</div>
+            </div>
+          </div>
+          <button id="btn-close-phone-wifi-modal" class="btn-icon" style="width: 28px; height: 28px; border-radius: 50%; border: 1px solid var(--border-subtle); background: rgba(255,255,255,0.06); color: #fff; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 13px;">✕</button>
+        </div>
+
+        <!-- Wi-Fi Power Row -->
+        <div style="padding: 14px 20px; background: rgba(255, 255, 255, 0.02); border-bottom: 1px solid var(--border-subtle); display: flex; align-items: center; justify-content: space-between;">
+          <div>
+            <div style="font-size: 13px; font-weight: 600; color: #fff;">Phone Wi-Fi</div>
+            <div style="font-size: 11px; color: #64748b;">${phoneWifiState.enabled ? (phoneWifiState.ssid ? `Connected to ${phoneWifiState.ssid}` : 'Wi-Fi enabled, searching') : 'Wi-Fi radio is off'}</div>
+          </div>
+          <button id="btn-toggle-phone-wifi-power" style="padding: 6px 16px; font-size: 12px; font-weight: 600; border-radius: 8px; border: none; background: ${phoneWifiState.enabled ? '#38bdf8' : 'rgba(255,255,255,0.1)'}; color: #fff; cursor: pointer; transition: all 0.2s;">
+            ${phoneWifiState.enabled ? 'Turn OFF' : 'Turn ON'}
+          </button>
+        </div>
+
+        <!-- Connection Details Card -->
+        <div style="padding: 18px 20px; display: flex; flex-direction: column; gap: 12px;">
+          ${phoneWifiState.ssid ? `
+            <div style="display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; border-radius: 12px; background: rgba(56, 189, 248, 0.08); border: 1px solid rgba(56, 189, 248, 0.25);">
+              <div>
+                <div style="font-size: 13.5px; font-weight: 600; color: #fff;">${phoneWifiState.ssid}</div>
+                <div style="font-size: 11px; color: #38bdf8; margin-top: 3px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+                  <span>IP:</span> ${renderPrivacyMask(phoneWifiState.ip || '192.168.1.12')} <span>&bull; Speed: ${phoneWifiState.link_speed || '78 Mbps'}</span>
+                </div>
+              </div>
+              <span style="font-size: 11px; color: #38bdf8; font-weight: 600; background: rgba(56, 189, 248, 0.15); padding: 4px 8px; border-radius: 6px;">
+                Active
+              </span>
+            </div>
+          ` : `
+            <div style="padding: 14px; text-align: center; color: #64748b; font-size: 12px; border-radius: 12px; border: 1px dashed var(--border-subtle);">
+              ${phoneWifiState.enabled ? 'Phone is not connected to any Wi-Fi network' : 'Wi-Fi is turned off on the phone'}
+            </div>
+          `}
+
+          <!-- Hotspot Status -->
+          <div style="display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; border-radius: 12px; background: ${phoneHotspotState.enabled ? 'rgba(56, 182, 255, 0.08)' : 'rgba(255, 255, 255, 0.03)'}; border: 1px solid ${phoneHotspotState.enabled ? 'rgba(56, 182, 255, 0.3)' : 'var(--border-subtle)'};">
+            <div style="display: flex; align-items: center; gap: 12px;">
+              <div style="width: 32px; height: 32px; border-radius: 50%; background: ${phoneHotspotState.enabled ? 'rgba(56, 182, 255, 0.15)' : 'rgba(255, 255, 255, 0.05)'}; display: flex; align-items: center; justify-content: center;">
+                ${Icons.Radio(16, phoneHotspotState.enabled ? '#38b6ff' : '#64748b')}
+              </div>
+              <div>
+                <div style="font-size: 13px; font-weight: 600; color: #fff;">Personal Hotspot</div>
+                <div style="font-size: 11px; color: ${phoneHotspotState.enabled ? '#38b6ff' : '#64748b'}; margin-top: 2px; display: flex; align-items: center; gap: 6px;">
+                  ${phoneHotspotState.enabled ? `<span>Active &bull;</span> ${renderPrivacyMask(phoneHotspotState.ip || '10.179.43.225')}` : '<span>Tethering idle</span>'}
+                </div>
+              </div>
+            </div>
+            <span style="font-size: 11px; color: ${phoneHotspotState.enabled ? '#38b6ff' : '#64748b'}; font-weight: 600;">
+              ${phoneHotspotState.enabled ? 'Sharing' : 'Off'}
+            </span>
+          </div>
+        </div>
+
+        <!-- Footer -->
+        <div style="padding: 12px 20px; border-top: 1px solid var(--border-subtle); display: flex; align-items: center; justify-content: space-between; background: rgba(255,255,255,0.02); font-size: 11.5px;">
+          <button id="btn-refresh-phone-wifi" style="background: transparent; border: none; color: #38bdf8; cursor: pointer; display: flex; align-items: center; gap: 5px; font-weight: 500;">
+            ↻ Refresh Wi-Fi
+          </button>
+          <span style="color: #64748b; font-size: 11px;">Seamless 1-click toggling</span>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 function renderLightboxModal(): string {
   if (!activeLightboxPhoto) return '';
   const thumbData = photoThumbnails.get(activeLightboxPhoto.path);
@@ -1488,18 +2118,21 @@ function renderLightboxModal(): string {
 
 function renderAddFavouriteModal(): string {
   if (!isAddFavouriteModalOpen) return '';
+  const isEditing = Boolean(editingContactId);
 
   return `
     <div class="modal-backdrop" id="fav-modal-backdrop">
       <div class="modal-window" style="max-width: 420px;">
         <div class="modal-header">
           <div style="display: flex; align-items: center; gap: 10px;">
-            <div style="width: 34px; height: 34px; border-radius: 10px; background: rgba(255, 110, 50, 0.15); color: var(--accent-solar); display: flex; align-items: center; justify-content: center;">
+            <div style="width: 34px; height: 34px; border-radius: 10px; background: rgba(56, 182, 255, 0.15); color: var(--accent-solar); display: flex; align-items: center; justify-content: center;">
               ${Icons.Users(18, 'currentColor')}
             </div>
             <div>
-              <h2 style="font-size: 15px; font-weight: 700; color: #fff;">Add Contact</h2>
-              <p style="font-size: 11px; color: var(--text-secondary); margin-top: 1px;">Save quick speed-dial contact to Calls & Audio</p>
+              <h2 style="font-size: 15px; font-weight: 700; color: #fff;">${isEditing ? 'Edit Contact' : 'Add Contact'}</h2>
+              <p style="font-size: 11px; color: var(--text-secondary); margin-top: 1px;">
+                ${isEditing ? 'Update contact info on Mac & phone dialer' : 'Save contact and sync to phone contacts & dialer'}
+              </p>
             </div>
           </div>
           <button class="btn-icon" id="btn-close-fav-modal" style="width: 28px; height: 28px; border-radius: 50%; border: 1px solid var(--border-subtle); background: rgba(255,255,255,0.03); color: #fff; cursor: pointer; display: flex; align-items: center; justify-content: center;">✕</button>
@@ -1530,8 +2163,181 @@ function renderAddFavouriteModal(): string {
 
           <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px;">
             <button class="btn-luxury" id="btn-cancel-fav-modal" style="padding: 7px 14px; font-size: 12px;">Cancel</button>
-            <button class="btn-solar" id="btn-save-fav-modal" style="padding: 7px 18px; font-size: 12px;">Add Contact</button>
+            <button class="btn-solar" id="btn-save-fav-modal" style="padding: 7px 18px; font-size: 12px;">
+              ${isEditing ? 'Save Changes' : 'Add Contact'}
+            </button>
           </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// MARK: - Floating Keypad Modal (Authentic Apple iOS / One UI 9 Circular Dialpad)
+function renderFloatingKeypadModal(): string {
+  if (!isFloatingKeypadOpen) return '';
+
+  const cleanDialer = dialerInputNumber.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+  const matchedContact = cleanDialer.length >= 1
+    ? [...favouriteContacts, ...phoneContacts].find(c => 
+        c.number.replace(/[^0-9]/g, '').includes(cleanDialer) || 
+        c.name.toLowerCase().includes(cleanDialer)
+      )
+    : null;
+
+  return `
+    <div class="modal-backdrop" id="keypad-modal-backdrop">
+      <div class="ios-keypad-window">
+        <button class="ios-keypad-header-close" id="btn-close-floating-keypad" title="Close Keypad">✕</button>
+
+        <!-- Centered iOS Number Display -->
+        <div class="ios-dialer-display">
+          <div class="ios-dialer-match" id="dialer-matched-name">
+            ${matchedContact ? matchedContact.name : ''}
+          </div>
+          <input 
+            type="text" 
+            class="ios-dialer-input" 
+            id="input-dialer-number" 
+            placeholder="" 
+            value="${dialerInputNumber}"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </div>
+
+        <!-- 3x4 Grid of 66px Circles -->
+        <div class="ios-keypad-grid">
+          ${renderKeypadBtn('1', '')}
+          ${renderKeypadBtn('2', 'ABC')}
+          ${renderKeypadBtn('3', 'DEF')}
+          ${renderKeypadBtn('4', 'GHI')}
+          ${renderKeypadBtn('5', 'JKL')}
+          ${renderKeypadBtn('6', 'MNO')}
+          ${renderKeypadBtn('7', 'PQRS')}
+          ${renderKeypadBtn('8', 'TUV')}
+          ${renderKeypadBtn('9', 'WXYZ')}
+          ${renderKeypadBtn('*', '')}
+          ${renderKeypadBtn('0', '+')}
+          ${renderKeypadBtn('#', '')}
+        </div>
+
+        <!-- 5th Row: Spacer, Center Green Call Circle, Right Backspace -->
+        <div class="ios-keypad-bottom-row">
+          <div style="width: 66px; height: 66px;"></div>
+          <button class="ios-btn-call" id="btn-trigger-call" title="Call">
+            ${Icons.Calls(26, '#fff')}
+          </button>
+          ${dialerInputNumber.length > 0 ? `
+            <button class="ios-btn-backspace" id="btn-dialer-backspace" title="Delete">
+              ⌫
+            </button>
+          ` : `
+            <div style="width: 66px; height: 66px;"></div>
+          `}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// MARK: - Contacts Directory Modal (Searchable, Syncable, Clean)
+function renderContactsDirectoryModal(): string {
+  if (!isContactsDirectoryOpen) return '';
+
+  const cleanQuery = contactsDirectorySearchQuery.trim().toLowerCase();
+  
+  // Combine favorites and phone contacts uniquely
+  const allContactsMap = new Map<string, { id?: string; name: string; number: string; avatarColor?: string; isFav: boolean }>();
+  
+  favouriteContacts.forEach(fc => {
+    const key = fc.number.replace(/[^0-9]/g, '');
+    if (key) allContactsMap.set(key, { id: fc.id, name: fc.name, number: fc.number, avatarColor: fc.avatarColor, isFav: true });
+  });
+
+  phoneContacts.forEach(pc => {
+    const key = pc.number.replace(/[^0-9]/g, '');
+    if (key && !allContactsMap.has(key)) {
+      allContactsMap.set(key, { id: pc.id, name: pc.name, number: pc.number, isFav: false });
+    }
+  });
+
+  const allContacts = Array.from(allContactsMap.values());
+  const filtered = allContacts.filter(c => {
+    if (!cleanQuery) return true;
+    return c.name.toLowerCase().includes(cleanQuery) || c.number.replace(/[^0-9]/g, '').includes(cleanQuery.replace(/[^0-9]/g, ''));
+  });
+
+  return `
+    <div class="modal-backdrop" id="contacts-modal-backdrop">
+      <div class="modal-window contacts-directory-window">
+        <!-- Header -->
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <div style="width: 36px; height: 36px; border-radius: 10px; background: rgba(59, 130, 246, 0.15); color: #3b82f6; display: flex; align-items: center; justify-content: center;">
+              ${Icons.Users(20, 'currentColor')}
+            </div>
+            <div>
+              <h2 style="font-size: 16px; font-weight: 700; color: #fff;">Contacts</h2>
+              <p style="font-size: 11.5px; color: ${isSyncingContacts ? '#38b6ff' : 'var(--text-secondary)'}; margin-top: 1px;">
+                ${isSyncingContacts ? `Syncing contacts from phone (${syncProgressPercentage}%)...` : `${allContacts.length} contacts available • Smart Synced`}
+              </p>
+            </div>
+          </div>
+          <button class="btn-icon" id="btn-close-contacts-modal" style="width: 28px; height: 28px; border-radius: 50%; border: 1px solid var(--border-subtle); background: rgba(255,255,255,0.04); color: #fff; cursor: pointer; display: flex; align-items: center; justify-content: center;">✕</button>
+        </div>
+
+        <!-- Sync Progress Bar -->
+        <div style="height: 3px; width: 100%; background: rgba(255,255,255,0.06); border-radius: 2px; overflow: hidden; margin-bottom: 12px; transition: opacity 0.3s; ${isSyncingContacts ? 'opacity: 1;' : 'opacity: 0; pointer-events: none;'}">
+          <div style="height: 100%; width: ${isSyncingContacts ? (syncProgressPercentage || 50) : 0}%; background: linear-gradient(90deg, #38b6ff, #4ae38b); border-radius: 2px; transition: width 0.25s ease;"></div>
+        </div>
+
+        <!-- Search & Actions Bar -->
+        <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 14px;">
+          <div style="flex: 1; position: relative;">
+            <input 
+              type="text" 
+              id="input-search-contacts-directory" 
+              placeholder="Search contacts by name or number..." 
+              value="${contactsDirectorySearchQuery}"
+              style="width: 100%; background: rgba(255,255,255,0.05); border: 1px solid var(--border-subtle); border-radius: 10px; color: #fff; padding: 7px 12px; font-size: 12.5px; outline: none;"
+            />
+          </div>
+          <button class="btn-luxury" id="btn-sync-phone-contacts-modal" style="padding: 7px 12px; font-size: 11.5px; display: flex; align-items: center; gap: 5px;" ${isSyncingContacts ? 'disabled' : ''} title="Sync contacts from Android phone">
+            <span>${isSyncingContacts ? '⏳' : '🔄'}</span> <span>${isSyncingContacts ? `Syncing ${syncProgressPercentage}%` : 'Sync Phone'}</span>
+          </button>
+          <button class="btn-solar" id="btn-open-add-contact-modal" style="padding: 7px 14px; font-size: 11.5px; display: flex; align-items: center; gap: 5px;">
+            <span>+ Add Contact</span>
+          </button>
+        </div>
+
+        <!-- Scrollable Contacts List -->
+        <div class="contacts-directory-list" style="flex: 1; overflow-y: auto; padding-right: 4px; display: flex; flex-direction: column; gap: 6px;">
+          ${filtered.length === 0 ? `
+            <div style="text-align: center; padding: 48px 20px; color: var(--text-muted); font-size: 13px;">
+              ${allContacts.length === 0 ? 'No contacts found. Click "Sync Phone" or "+ Add Contact" to populate.' : `No contacts matching "${contactsDirectorySearchQuery}".`}
+            </div>
+          ` : filtered.map(c => `
+            <div class="contact-card-premium" style="display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; background: rgba(255,255,255,0.025); border: 1px solid var(--border-subtle); border-radius: 12px;">
+              <div style="display: flex; align-items: center; gap: 12px; min-width: 0;">
+                <div class="contact-card-avatar" style="width: 38px; height: 38px; border-radius: 50%; background: ${getContactAvatarGradient(c.name, c.avatarColor)}; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 700; font-size: 14px; flex-shrink: 0;">
+                  ${getContactInitials(c.name)}
+                </div>
+                <div style="display: flex; flex-direction: column; min-width: 0;">
+                  <span style="font-size: 13.5px; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${c.name}</span>
+                  <span style="font-size: 11.5px; color: var(--text-secondary); margin-top: 1px;">${c.number}</span>
+                </div>
+              </div>
+              <div style="display: flex; align-items: center; gap: 8px; flex-shrink: 0;">
+                <button class="btn-solar btn-quick-dial" data-number="${c.number}" title="Call ${c.name}" style="padding: 5px 12px; font-size: 11.5px; display: flex; align-items: center; gap: 5px;">
+                  ${Icons.Calls(13, '#fff')} <span>Call</span>
+                </button>
+                <button class="btn-star-fav ${c.isFav ? 'active' : ''} btn-toggle-fav-contact" data-name="${c.name}" data-number="${c.number}" title="${c.isFav ? 'Remove from Favorites' : 'Add to Favorites'}">
+                  ${c.isFav ? '★' : '☆'}
+                </button>
+              </div>
+            </div>
+          `).join('')}
         </div>
       </div>
     </div>
@@ -1571,50 +2377,55 @@ function renderFloatingCallHUD(): string {
         </div>
       </div>
 
-      <!-- Single Device Switch Button Row (As Requested: Mac vs Phone toggle) -->
-      <div class="hud-device-switch-row">
-        <div class="hud-current-route-label">
-          ${
-            callAudioRoute === 'mac'
-              ? `${Icons.Laptop(15, 'var(--accent-solar)')} <span>Using Mac Audio & Mic</span>`
-              : `${Icons.Phone(15, 'var(--emerald-ion)')} <span>Using Phone Handset</span>`
-          }
+      <!-- Apple Continuity Audio Route Segmented Control -->
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        <div class="call-hud-route-segmented">
+          <button class="call-route-pill ${callAudioRoute === 'mac' || callAudioRoute === 'phone_speaker' ? 'active' : ''}" id="btn-hud-route-speaker" title="Hands-Free Loudspeaker & High-Gain Desk Mic">
+            ${Icons.Volume2(13, 'currentColor')} <span>Hands-Free</span>
+          </button>
+          <button class="call-route-pill ${callAudioRoute === 'phone' ? 'active' : ''}" id="btn-hud-route-phone" title="Switch to Private Handset (Earpiece)">
+            ${Icons.Phone(13, 'currentColor')} <span>Private</span>
+          </button>
+          <button class="call-route-pill ${callAudioRoute === 'bluetooth' ? 'active' : ''}" id="btn-hud-route-bt" title="Route to Connected Bluetooth Headset">
+            ${Icons.Bluetooth(13, 'currentColor')} <span>Headset</span>
+          </button>
         </div>
-        <button class="hud-btn-switch-device" id="btn-hud-switch-device" title="Switch between Mac and Phone">
-          ⇄ Switch to ${callAudioRoute === 'mac' ? 'Phone' : 'Mac'}
-        </button>
+        <div style="font-size: 10px; color: #10b981; background: rgba(16,185,129,0.08); border: 1px solid rgba(16,185,129,0.25); padding: 5px 10px; border-radius: 8px; display: flex; align-items: center; justify-content: space-between; gap: 6px;">
+          <span>${callAudioRoute === 'phone' ? '📱 Private earpiece active' : callAudioRoute === 'bluetooth' ? '🎧 Bluetooth headset active' : '🔊 Hands-Free Loudspeaker & Mic active • Media paused'}</span>
+          <span style="font-size: 9px; opacity: 0.8; color: #fff;">1-Click Switch</span>
+        </div>
       </div>
 
-      <!-- In-Call Actions: Mute, Record, Add Person / Conference, End -->
+      <!-- In-Call Actions: Mute, Keypad, Conference, End -->
       <div class="hud-controls-grid">
         <!-- Mute / Unmute -->
         <div class="hud-action-col">
           <button class="hud-ctrl-btn ${isCallMuted ? 'active' : ''}" id="btn-hud-mute" title="${isCallMuted ? 'Unmute Microphone' : 'Mute Microphone'}">
-            ${isCallMuted ? '🔇' : '🎙️'}
+            ${isCallMuted ? Icons.MicOff(18, isCallMuted ? '#111' : '#fff') : Icons.Mic(18, '#fff')}
           </button>
           <span class="hud-btn-label">${isCallMuted ? 'Muted' : 'Mute'}</span>
         </div>
 
-        <!-- Record Call Audio -->
+        <!-- Keypad / DTMF -->
         <div class="hud-action-col">
-          <button class="hud-ctrl-btn ${isCallRecording ? 'recording' : ''}" id="btn-hud-record" title="${isCallRecording ? 'Stop Recording' : 'Record Call Audio'}">
-            ${isCallRecording ? '⏹️' : '⏺️'}
+          <button class="hud-ctrl-btn" id="btn-hud-keypad" title="Open Keypad">
+            ${Icons.Keypad(18, '#fff')}
           </button>
-          <span class="hud-btn-label">${isCallRecording ? 'Recording' : 'Record'}</span>
+          <span class="hud-btn-label">Keypad</span>
         </div>
 
         <!-- Add Person / Conference -->
         <div class="hud-action-col">
-          <button class="hud-ctrl-btn ${isAddPersonModalOpen ? 'active' : ''}" id="btn-hud-add-person" title="Add Person for Conference">
-            👥
+          <button class="hud-ctrl-btn ${isAddPersonModalOpen ? 'active' : ''}" id="btn-hud-add-person" title="Add Participant">
+            ${Icons.Users(18, '#fff')}
           </button>
-          <span class="hud-btn-label">Add Person</span>
+          <span class="hud-btn-label">Add</span>
         </div>
 
-        <!-- End Call (Red) -->
+        <!-- End Call (Crimson) -->
         <div class="hud-action-col">
           <button class="hud-ctrl-btn end" id="btn-hud-end-call" title="End Call">
-            ${Icons.Calls(20, '#fff')}
+            ${Icons.PhoneOff(19, '#fff')}
           </button>
           <span class="hud-btn-label" style="color: #ef4444; font-weight: 600;">End</span>
         </div>
@@ -1687,6 +2498,71 @@ function renderIncomingCallBanner(): string {
         <button class="btn-accept-incoming-call" id="btn-accept-incoming-call">
           📞 Accept on Mac
         </button>
+      </div>
+    </div>
+  `;
+}
+
+interface DeviceAuthRequest {
+  request_id: string;
+  device_id: string;
+  device_name: string;
+  brand: string;
+  ip: string;
+  requested_at: number;
+}
+let activeDeviceAuthRequest: DeviceAuthRequest | null = null;
+
+function renderDeviceAuthModal(): string {
+  if (!activeDeviceAuthRequest) return '';
+
+  const dev = activeDeviceAuthRequest;
+  return `
+    <div class="modal-backdrop" id="device-auth-modal-backdrop" style="position: fixed; inset: 0; background: rgba(0, 0, 0, 0.85); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); z-index: 10001; display: flex; align-items: center; justify-content: center; padding: 24px;">
+      <div class="modal-window glass-card" style="width: 100%; max-width: 480px; border: 1.5px solid rgba(56, 182, 255, 0.45); border-radius: 24px; background: #0f1015; box-shadow: 0 32px 64px rgba(0,0,0,0.85); overflow: hidden; display: flex; flex-direction: column;">
+        <div style="padding: 24px 24px 16px 24px; display: flex; align-items: center; gap: 14px; border-bottom: 1px solid rgba(255, 255, 255, 0.08);">
+          <div style="width: 44px; height: 44px; border-radius: 14px; background: rgba(56, 182, 255, 0.15); border: 1px solid rgba(56, 182, 255, 0.4); display: flex; align-items: center; justify-content: center; color: #38b6ff;">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          </div>
+          <div style="flex: 1;">
+            <div style="font-size: 11px; font-weight: 700; color: #38b6ff; letter-spacing: 0.6px; text-transform: uppercase;">Security Alert • Strict Device Lock</div>
+            <div style="font-size: 16px; font-weight: 700; color: #fff; margin-top: 2px;">New Device Authorization Request</div>
+          </div>
+        </div>
+
+        <div style="padding: 20px 24px; display: flex; flex-direction: column; gap: 16px;">
+          <p style="font-size: 13px; color: rgba(255, 255, 255, 0.85); line-height: 1.5; margin: 0;">
+            An unrecognized device on your local Wi-Fi network is attempting to link with this Mac:
+          </p>
+
+          <div style="background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 14px; padding: 14px 16px; display: flex; flex-direction: column; gap: 8px;">
+            <div style="display: flex; justify-content: space-between; font-size: 12.5px;">
+              <span style="color: var(--text-secondary);">Device Name:</span>
+              <strong style="color: #fff;">${dev.device_name}</strong>
+            </div>
+            <div style="display: flex; justify-content: space-between; font-size: 12.5px;">
+              <span style="color: var(--text-secondary);">Brand / Hardware:</span>
+              <span style="color: #fff;">${dev.brand}</span>
+            </div>
+            <div style="display: flex; justify-content: space-between; align-items: center; font-size: 12.5px;">
+              <span style="color: var(--text-secondary);">Network IP:</span>
+              ${renderPrivacyMask(dev.ip)}
+            </div>
+          </div>
+
+          <div style="font-size: 11.5px; color: rgba(255, 255, 255, 0.55); line-height: 1.45;">
+            ⚠️ Authorizing this device allows it to view your clipboard history, incoming notifications, and camera feeds. If you or a family member did not initiate this, click <strong>Block & Reject</strong>.
+          </div>
+        </div>
+
+        <div style="padding: 16px 24px 24px 24px; display: flex; gap: 12px; justify-content: flex-end; background: rgba(0, 0, 0, 0.2);">
+          <button id="btn-reject-device-auth" style="padding: 10px 18px; border-radius: 12px; border: 1px solid rgba(239, 68, 68, 0.4); background: rgba(239, 68, 68, 0.12); color: #ef4444; font-size: 12.5px; font-weight: 600; cursor: pointer; transition: all 0.2s;">
+            Block & Reject
+          </button>
+          <button id="btn-approve-device-auth" style="padding: 10px 20px; border-radius: 12px; border: none; background: #007aff; color: #fff; font-size: 12.5px; font-weight: 700; cursor: pointer; transition: all 0.2s;">
+            Authorize & Trust Device
+          </button>
+        </div>
       </div>
     </div>
   `;
@@ -1770,6 +2646,105 @@ async function fetchQuickPhoneApps() {
   } catch (_) {}
 }
 
+function playConnectionCelebration(deviceName: string) {
+  if (document.getElementById('idroid-connection-celebration-modal')) return;
+
+  const overlay = document.createElement('div');
+  overlay.id = 'idroid-connection-celebration-modal';
+  overlay.className = 'idroid-celebration-overlay';
+  overlay.innerHTML = `
+    <div class="celebration-stage">
+      <div class="celebration-pulse-wave"></div>
+      <div class="celebration-ambient-glow"></div>
+
+      <div class="celebration-logo-wrapper">
+        <svg class="celebration-official-logo" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <!-- Left Finder Blue Gradient -->
+            <linearGradient id="celFinderGrad" x1="70" y1="140" x2="512" y2="954" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stop-color="#38b6ff"/>
+              <stop offset="100%" stop-color="#0066d6"/>
+            </linearGradient>
+
+            <!-- Finder Nose Profile Highlight Gradient -->
+            <linearGradient id="celFinderNoseGrad" x1="420" y1="200" x2="512" y2="600" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stop-color="#72d3ff"/>
+              <stop offset="100%" stop-color="#2196f3"/>
+            </linearGradient>
+
+            <!-- Right Android Green Gradient -->
+            <linearGradient id="celAndroidGrad" x1="512" y1="140" x2="954" y2="954" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stop-color="#4ae38b"/>
+              <stop offset="100%" stop-color="#1eb05e"/>
+            </linearGradient>
+
+            <!-- Squircle Body Clip Path -->
+            <clipPath id="celSquircleClip">
+              <rect x="70" y="140" width="884" height="814" rx="196" ry="196"/>
+            </clipPath>
+          </defs>
+
+          <!-- Android Antenna -->
+          <line class="cel-antenna" x1="724" y1="184" x2="814" y2="76" stroke-width="44" stroke-linecap="round"/>
+
+          <!-- Squircle Face Container -->
+          <g clip-path="url(#celSquircleClip)">
+            <!-- Left Half: Finder Blue Fill -->
+            <rect class="cel-left-fill" x="70" y="140" width="442" height="814"/>
+
+            <!-- Classic Finder Nose Contour -->
+            <path class="cel-nose-fill" d="M512 140 V310 C454 310 416 374 416 462 C416 550 454 614 512 614 V954 H512 Z"/>
+
+            <!-- Right Half: Android Green Fill -->
+            <rect class="cel-right-fill" x="512" y="140" width="442" height="814"/>
+
+            <!-- Android Horizontal Neck Cut / Visor Line -->
+            <rect class="cel-visor-line" x="512" y="618" width="442" height="30"/>
+          </g>
+
+          <!-- Squircle Rim Outline (Starts pure white, transitions to subtle glass sheen) -->
+          <rect class="cel-squircle-outline" x="72" y="142" width="880" height="810" rx="194" ry="194"/>
+
+          <!-- Finder Nose Profile Line in Outline Phase -->
+          <path class="cel-nose-contour" d="M512 140 V310 C454 310 416 374 416 462 C416 550 454 614 512 614 V954"/>
+
+          <!-- Left Eye (Finder Classic Navy Oval) -->
+          <ellipse class="cel-left-eye" cx="290" cy="462" rx="38" ry="58"/>
+
+          <!-- Right Eye (Android Crisp White Circle) -->
+          <circle class="cel-right-eye" cx="734" cy="462" r="50"/>
+
+          <!-- Shared Connecting Joyful Smile (Starts pure white, transitions to authentic dual color) -->
+          <path class="cel-smile-base" d="M260 740 C380 865 644 865 764 740"/>
+          <path class="cel-smile-overlay" d="M512 836 C618 836 716 795 764 740"/>
+        </svg>
+      </div>
+
+      <div class="celebration-status-pill">
+        <span class="celebration-status-dot"></span>
+        <span class="celebration-status-text">Mac ⟷ ${deviceName || 'Android Phone'} Linked</span>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(overlay);
+
+  // Smooth sequence: White outline -> Left blue & Right green illumination -> Dissolve
+  requestAnimationFrame(() => {
+    overlay.classList.add('animate-in');
+    setTimeout(() => {
+      overlay.classList.add('connected');
+    }, 550);
+  });
+
+  setTimeout(() => {
+    overlay.classList.add('dissolve');
+    setTimeout(() => {
+      overlay.remove();
+    }, 450);
+  }, 2300);
+}
+
 async function pollDeviceTelemetry() {
   const invoke = await getInvoke();
   if (!invoke) return;
@@ -1809,8 +2784,10 @@ async function pollDeviceTelemetry() {
         hasSeededNotifications = false;
         // Preserve callHistory and clipboardHistory across disconnects
       } else if (prevStatus === 'Disconnected' && device.status === 'Connected') {
+        playConnectionCelebration(device.name);
         fetchQuickPhoneApps();
         fetchCallsAndNotifications();
+        fetchPhoneHardwareStates();
       }
 
       // Sync host Mac telemetry
@@ -1820,6 +2797,11 @@ async function pollDeviceTelemetry() {
           hostTelemetry = host;
         }
       } catch (_) {}
+
+      // Sync phone hardware telemetry
+      if (device.status === 'Connected') {
+        fetchPhoneHardwareStates();
+      }
 
       const statusChanged = prevStatus !== device.status;
       const connChanged = prevConn !== device.connectionType;
@@ -1846,30 +2828,166 @@ async function pollDeviceTelemetry() {
   }
 }
 
-async function pollIncomingCallStatus() {
-  if (device.status !== 'Connected' || isCallActive) return;
+async function pollCallStateSync() {
+  if (!isCallActive && !incomingCall && device.status !== 'Connected') return;
   const invoke = await getInvoke();
   if (!invoke) return;
 
   try {
-    const callInfo: any = await invoke('check_incoming_call');
-    if (callInfo && callInfo.is_ringing && !incomingCall) {
-      const rawNum = callInfo.number || 'Unknown Caller';
+    const callState: CallStateInfo = (await invoke('get_call_state')) as CallStateInfo;
+    if (!callState) return;
+
+    // 1. Detect when user or remote cuts/ends the call on phone
+    if (isCallActive && callState.state === 'idle') {
+      console.log('[Idroid Calls] Active call terminated on phone; syncing to idle state');
+      handleRemoteCallEnded();
+      return;
+    }
+
+    // 2. Detect incoming call ringing
+    if (callState.is_ringing && !incomingCall && !isCallActive) {
+      const rawNum = callState.number || 'Unknown Caller';
       const cleanNum = rawNum.replace(/[\s-]/g, '');
-      const matchedContact = favouriteContacts.find(c => c.number.replace(/[\s-]/g, '') === cleanNum);
+      const matchedContact = favouriteContacts.find(c => c.number.replace(/[\s-]/g, '') === cleanNum) ||
+                             phoneContacts.find(c => c.number.replace(/[\s-]/g, '') === cleanNum);
       const matchedHistory = callHistory.find(c => c.number.replace(/[\s-]/g, '') === cleanNum);
-      const callerName = matchedContact?.name || matchedHistory?.name || (callInfo.name || rawNum);
+      const callerName = matchedContact?.name || matchedHistory?.name || (callState.name || rawNum);
 
       incomingCall = {
         name: callerName,
         number: rawNum,
       };
       render();
-    } else if (callInfo && !callInfo.is_ringing && incomingCall) {
-      incomingCall = null;
+    } else if (!callState.is_ringing && incomingCall) {
+      // Ringing stopped on phone (declined, missed, or answered on phone)
+      if (callState.state === 'active') {
+        // Answered on phone directly! Transition Mac to active call display
+        const targetNum = incomingCall.number;
+        const targetName = incomingCall.name;
+        incomingCall = null;
+        activeCallTarget = targetNum;
+        activeCallTargetName = targetName;
+        isCallActive = true;
+        callDurationSec = 0;
+        if (callDurationTimer) clearInterval(callDurationTimer);
+        callDurationTimer = setInterval(() => {
+          callDurationSec++;
+          const timerEl = document.getElementById('hud-call-timer') || document.getElementById('active-call-timer');
+          if (timerEl) {
+            const mins = Math.floor(callDurationSec / 60).toString().padStart(2, '0');
+            const secs = (callDurationSec % 60).toString().padStart(2, '0');
+            timerEl.textContent = `${mins}:${secs}`;
+          }
+        }, 1000);
+        render();
+      } else {
+        // Declined or missed on phone
+        incomingCall = null;
+        render();
+      }
+    } else if (callState.state === 'active' && !isCallActive && !incomingCall) {
+      // Outgoing or active call initiated on phone directly!
+      activeCallTarget = callState.number || 'Ongoing Call';
+      const cleanNum = activeCallTarget.replace(/[\s-]/g, '');
+      const matched = favouriteContacts.find(c => c.number.replace(/[\s-]/g, '') === cleanNum) ||
+                      phoneContacts.find(c => c.number.replace(/[\s-]/g, '') === cleanNum);
+      activeCallTargetName = matched?.name || (callState.name || activeCallTarget);
+      isCallActive = true;
+      callDurationSec = 0;
+      if (callDurationTimer) clearInterval(callDurationTimer);
+      callDurationTimer = setInterval(() => {
+        callDurationSec++;
+        const timerEl = document.getElementById('hud-call-timer') || document.getElementById('active-call-timer');
+        if (timerEl) {
+          const mins = Math.floor(callDurationSec / 60).toString().padStart(2, '0');
+          const secs = (callDurationSec % 60).toString().padStart(2, '0');
+          timerEl.textContent = `${mins}:${secs}`;
+        }
+      }, 1000);
       render();
     }
   } catch (_) {}
+}
+
+function triggerCallEndedTransientBanner() {
+  const existing = document.getElementById('transient-call-ended-pill');
+  if (existing) existing.remove();
+
+  const pill = document.createElement('div');
+  pill.id = 'transient-call-ended-pill';
+  pill.style.cssText = `
+    position: fixed;
+    top: 36px;
+    right: 32px;
+    background: rgba(24, 25, 30, 0.92);
+    backdrop-filter: blur(28px);
+    -webkit-backdrop-filter: blur(28px);
+    border: 1px solid rgba(239, 68, 68, 0.4);
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.6);
+    border-radius: 14px;
+    padding: 10px 18px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+    z-index: 999999;
+    animation: hudSlideIn 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  `;
+  pill.innerHTML = `
+    <div style="width: 8px; height: 8px; border-radius: 50%; background: #ef4444;"></div>
+    <span>Call Ended</span>
+  `;
+  document.body.appendChild(pill);
+  setTimeout(() => {
+    pill.style.transition = 'opacity 0.4s ease, transform 0.4s ease';
+    pill.style.opacity = '0';
+    pill.style.transform = 'translateY(-10px)';
+    setTimeout(() => pill.remove(), 400);
+  }, 1400);
+}
+
+function handleRemoteCallEnded() {
+  const wasActive = isCallActive || Boolean(incomingCall);
+  incomingCall = null;
+  isCallActive = false;
+  isCallMuted = false;
+  isCallRecording = false;
+  isAddPersonModalOpen = false;
+  conferenceParticipants = [];
+  if (callDurationTimer) {
+    clearInterval(callDurationTimer);
+    callDurationTimer = null;
+  }
+  if (callHistory.length > 0 && (callHistory[0].number === activeCallTarget || callHistory[0].name === activeCallTargetName)) {
+    const mins = Math.floor(callDurationSec / 60);
+    const secs = callDurationSec % 60;
+    callHistory[0].duration = `${mins}m ${secs}s`;
+    try {
+      localStorage.setItem('idroid_call_history', JSON.stringify(callHistory));
+    } catch (_) {}
+  }
+  activeCallTarget = '';
+  activeCallTargetName = '';
+  callDurationSec = 0;
+
+  const floatingCard = document.getElementById('incoming-call-floating-card');
+  if (floatingCard) floatingCard.remove();
+  const floatingHud = document.getElementById('floating-call-hud');
+  if (floatingHud) floatingHud.remove();
+
+  if (wasActive) {
+    triggerCallEndedTransientBanner();
+  }
+
+  try {
+    import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
+      getCurrentWindow().setAlwaysOnTop(false);
+    });
+  } catch (_) {}
+
+  render();
 }
 
 async function pollCameraStreamStatus() {
@@ -2108,7 +3226,7 @@ function triggerLiveNotificationToast(n: NotificationItem) {
     }
   }
   if (!iconHtml) {
-    iconHtml = `<div class="toast-app-icon" style="background: rgba(255, 110, 50, 0.15); display: flex; align-items: center; justify-content: center; color: var(--accent-solar);">
+    iconHtml = `<div class="toast-app-icon" style="background: rgba(56, 182, 255, 0.15); display: flex; align-items: center; justify-content: center; color: var(--accent-solar);">
       ${Icons.Notifications(14, 'currentColor')}
     </div>`;
   }
@@ -2118,13 +3236,21 @@ function triggerLiveNotificationToast(n: NotificationItem) {
   const toastId = 'toast-' + Math.random().toString(36).substring(2, 9);
   toast.id = toastId;
 
+  const isCallEndedNotice =
+    (n.title || '').toLowerCase().includes('ended') ||
+    (n.text || '').toLowerCase().includes('disconnected') ||
+    (n.title || '').toLowerCase().includes('missed') ||
+    (n.text || '').toLowerCase().includes('missed');
+
   const isIncomingCall =
-    (n.appName || '').toLowerCase().includes('phone') ||
-    (n.appName || '').toLowerCase().includes('call') ||
-    (n.title || '').toLowerCase().includes('call') ||
-    (n.text || '').toLowerCase().includes('call') ||
-    (n.package_name || '').includes('dialer') ||
-    (n.package_name || '').includes('telecom');
+    !isCallEndedNotice &&
+    ((n.appName || '').toLowerCase().includes('phone') ||
+     (n.appName || '').toLowerCase().includes('dialer') ||
+     (n.package_name || '').includes('telecom') ||
+     (n.package_name || '').includes('dialer')) &&
+    ((n.title || '').toLowerCase().includes('incoming') ||
+     (n.text || '').toLowerCase().includes('incoming') ||
+     (n.text || '').toLowerCase().includes('ringing'));
 
   if (isIncomingCall && !isCallActive && !incomingCall) {
     incomingCall = {
@@ -2276,12 +3402,28 @@ async function fetchCallsAndNotifications() {
 
   try {
     const remoteCalls: CallRecord[] = (await invoke('get_call_history')) || [];
-    if (Array.isArray(remoteCalls) && remoteCalls.length > 0) {
-      // Merge remote call logs with existing callHistory without overwriting local calls
-      const existingIds = new Set(callHistory.map((c) => c.id));
-      const newItems = remoteCalls.filter((c) => !existingIds.has(c.id));
-      if (newItems.length > 0) {
-        callHistory = [...callHistory, ...newItems].slice(0, 50);
+    if (Array.isArray(remoteCalls)) {
+      if (remoteCalls.length > 0) {
+        const remotePhoneIds = new Set(remoteCalls.map((c) => c.phone_id || c.id));
+        // Remove locally cached records whose phone_id is no longer present on phone (deleted on phone)
+        callHistory = callHistory.filter((c) => {
+          if (c.phone_id) {
+            return remotePhoneIds.has(c.phone_id);
+          }
+          return true;
+        });
+
+        const existingIds = new Set(callHistory.map((c) => c.phone_id || c.id));
+        const newItems = remoteCalls.filter((c) => !existingIds.has(c.phone_id || c.id));
+        if (newItems.length > 0) {
+          callHistory = [...newItems, ...callHistory].slice(0, 50);
+        }
+        try {
+          localStorage.setItem('idroid_call_history', JSON.stringify(callHistory));
+        } catch (_) {}
+      } else if (device.status === 'Connected') {
+        // Call log is empty on phone: remove phone-originated records
+        callHistory = callHistory.filter((c) => !c.phone_id);
         try {
           localStorage.setItem('idroid_call_history', JSON.stringify(callHistory));
         } catch (_) {}
@@ -2313,6 +3455,9 @@ async function fetchCallsAndNotifications() {
     }
     notificationList = notifs;
     clipboardHistory = await invoke('get_clipboard_history');
+    if (currentSection === 'calls' || currentSection === 'dashboard') {
+      render();
+    }
   } catch (err) {
     console.error('Failed to fetch calls/notifications:', err);
   }
@@ -2506,29 +3651,164 @@ async function handleSavePhotosToMac(paths?: string[]) {
   }
 }
 
-function handleAddFavouriteContact(name?: string, number?: string) {
+async function handleAddFavouriteContact(name?: string, number?: string) {
   const contactName = (name !== undefined ? name : newFavName).trim();
   const contactNumber = (number !== undefined ? number : newFavNumber).trim();
   if (!contactName || !contactNumber) return;
-  const colors = ['#ec4899', '#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#06b6d4'];
+  const colors = ['#ec4899', '#3b82f6', '#10b981', '#38b6ff', '#8b5cf6', '#06b6d4'];
   const color = colors[favouriteContacts.length % colors.length];
+  const newId = `fav-${Date.now()}`;
   favouriteContacts.push({
-    id: `fav-${Date.now()}`,
+    id: newId,
     name: contactName,
     number: contactNumber,
     avatarColor: color,
+    contact_type: 'Mobile',
   });
   try {
     localStorage.setItem('idroid_favourite_contacts', JSON.stringify(favouriteContacts));
   } catch (_) {}
   newFavName = '';
   newFavNumber = '';
+  editingContactId = '';
   isAddFavouriteModalOpen = false;
   render();
+
+  const invoke = await getInvoke();
+  if (invoke) {
+    try {
+      await invoke('add_phone_contact', { name: contactName, number: contactNumber });
+    } catch (e) {
+      console.warn('add_phone_contact error:', e);
+    }
+  }
 }
 
-function handleRemoveFavouriteContact(id: string) {
+async function handleEditFavouriteContact(id: string, name?: string, number?: string) {
+  const contactName = (name !== undefined ? name : newFavName).trim();
+  const contactNumber = (number !== undefined ? number : newFavNumber).trim();
+  if (!contactName || !contactNumber) return;
+
+  const target = favouriteContacts.find(c => c.id === id);
+  if (target) {
+    target.name = contactName;
+    target.number = contactNumber;
+  }
+  try {
+    localStorage.setItem('idroid_favourite_contacts', JSON.stringify(favouriteContacts));
+  } catch (_) {}
+  newFavName = '';
+  newFavNumber = '';
+  editingContactId = '';
+  isAddFavouriteModalOpen = false;
+  render();
+
+  const invoke = await getInvoke();
+  if (invoke) {
+    try {
+      await invoke('edit_phone_contact', { contactId: id, name: contactName, number: contactNumber });
+    } catch (e) {
+      console.warn('edit_phone_contact error:', e);
+    }
+  }
+}
+
+async function handleRemoveFavouriteContact(id: string) {
   favouriteContacts = favouriteContacts.filter(c => c.id !== id);
+  try {
+    localStorage.setItem('idroid_favourite_contacts', JSON.stringify(favouriteContacts));
+  } catch (_) {}
+  render();
+
+  const invoke = await getInvoke();
+  if (invoke) {
+    try {
+      await invoke('delete_phone_contact', { contactId: id });
+    } catch (e) {
+      console.warn('delete_phone_contact error:', e);
+    }
+  }
+}
+
+async function fetchPhoneContacts() {
+  const invoke = await getInvoke();
+  if (!invoke) return;
+
+  try {
+    isSyncingContacts = true;
+    syncProgressPercentage = 15;
+    render();
+
+    // Smoothly step progress while query executes over ADB/TCP
+    const timer = setInterval(() => {
+      if (syncProgressPercentage < 80) {
+        syncProgressPercentage += 15;
+        render();
+      }
+    }, 180);
+
+    const remoteContacts: PhoneContact[] = (await invoke('get_phone_contacts')) || [];
+    clearInterval(timer);
+    syncProgressPercentage = 90;
+    render();
+
+    if (Array.isArray(remoteContacts) && remoteContacts.length > 0) {
+      // Smart Merge: index existing contacts by clean number to preserve edits & additions
+      const map = new Map<string, PhoneContact>();
+      phoneContacts.forEach((c) => {
+        const key = c.number.replace(/[^0-9+]/g, '');
+        if (key) map.set(key, c);
+      });
+
+      for (const rc of remoteContacts) {
+        const key = rc.number.replace(/[^0-9+]/g, '');
+        if (!key) continue;
+        if (!map.has(key)) {
+          map.set(key, rc);
+        } else {
+          const cur = map.get(key)!;
+          if (rc.name && rc.name !== 'Unknown') cur.name = rc.name;
+          if (rc.contact_type) cur.contact_type = rc.contact_type;
+        }
+      }
+
+      phoneContacts = Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
+      lastContactsSyncTime = Date.now();
+      try {
+        localStorage.setItem('idroid_synced_phone_contacts', JSON.stringify(phoneContacts));
+        localStorage.setItem('idroid_phone_contacts', JSON.stringify(phoneContacts));
+        localStorage.setItem('idroid_last_contacts_sync', lastContactsSyncTime.toString());
+      } catch (_) {}
+    }
+    syncProgressPercentage = 100;
+    render();
+    await new Promise(r => setTimeout(r, 350));
+  } catch (e) {
+    console.warn('fetchPhoneContacts error:', e);
+  } finally {
+    isSyncingContacts = false;
+    syncProgressPercentage = 0;
+    render();
+  }
+}
+
+// Toggle a contact into or out of true saved Favorites
+function handleToggleFavouriteContact(name: string, number: string) {
+  const clean = number.replace(/[\s-]/g, '');
+  const existingIdx = favouriteContacts.findIndex(c => c.number.replace(/[\s-]/g, '') === clean);
+  if (existingIdx >= 0) {
+    favouriteContacts.splice(existingIdx, 1);
+  } else {
+    const colors = ['#ec4899', '#3b82f6', '#10b981', '#38b6ff', '#8b5cf6', '#06b6d4'];
+    const color = colors[favouriteContacts.length % colors.length];
+    favouriteContacts.push({
+      id: `fav-${Date.now()}-${clean}`,
+      name: name || number,
+      number: number,
+      contact_type: 'Mobile',
+      avatarColor: color,
+    });
+  }
   try {
     localStorage.setItem('idroid_favourite_contacts', JSON.stringify(favouriteContacts));
   } catch (_) {}
@@ -2601,33 +3881,60 @@ async function handleStartMirror(targetPackage?: string, appTitle?: string, icon
 }
 
 // MARK: - Telephony & Calls Handlers
+function updateFloatingDialerState() {
+  const inputEl = document.getElementById('input-dialer-number') as HTMLInputElement;
+  if (inputEl) inputEl.value = dialerInputNumber;
+
+  const matchEl = document.getElementById('dialer-matched-name');
+  if (matchEl) {
+    const cleanDialer = dialerInputNumber.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+    const matchedContact = cleanDialer.length >= 1
+      ? [...favouriteContacts, ...phoneContacts].find(c => 
+          c.number.replace(/[^0-9]/g, '').includes(cleanDialer) || 
+          c.name.toLowerCase().includes(cleanDialer)
+        )
+      : null;
+    matchEl.textContent = matchedContact ? matchedContact.name : '';
+  }
+
+  const backspaceBtn = document.getElementById('btn-dialer-backspace');
+  if ((!backspaceBtn && dialerInputNumber.length > 0) || (backspaceBtn && dialerInputNumber.length === 0)) {
+    render();
+    setTimeout(() => {
+      const el = document.getElementById('input-dialer-number') as HTMLInputElement;
+      if (el) el.focus();
+    }, 10);
+  }
+}
+
 function handleDialDigit(digit: string) {
   dialerInputNumber += digit;
-  const inputEl = document.getElementById('input-dialer-number') as HTMLInputElement;
-  if (inputEl) {
-    inputEl.value = dialerInputNumber;
-  }
+  updateFloatingDialerState();
 }
 
 function handleDialBackspace() {
   dialerInputNumber = dialerInputNumber.slice(0, -1);
-  const inputEl = document.getElementById('input-dialer-number') as HTMLInputElement;
-  if (inputEl) {
-    inputEl.value = dialerInputNumber;
-  }
+  updateFloatingDialerState();
 }
 
 function handleDialClear() {
   dialerInputNumber = '';
-  const inputEl = document.getElementById('input-dialer-number') as HTMLInputElement;
-  if (inputEl) {
-    inputEl.value = '';
-    inputEl.focus();
-  }
+  updateFloatingDialerState();
 }
 
-async function handleToggleCallAudioRoute(route?: 'mac' | 'phone') {
-  callAudioRoute = route || (callAudioRoute === 'mac' ? 'phone' : 'mac');
+async function handleToggleCallAudioRoute(route?: 'mac' | 'phone_speaker' | 'phone' | 'bluetooth') {
+  if (route) {
+    callAudioRoute = route;
+  } else {
+    // Cycle between phone_speaker -> phone -> bluetooth -> phone_speaker
+    if (callAudioRoute === 'phone_speaker' || callAudioRoute === 'mac') {
+      callAudioRoute = 'phone';
+    } else if (callAudioRoute === 'phone') {
+      callAudioRoute = 'bluetooth';
+    } else {
+      callAudioRoute = 'phone_speaker';
+    }
+  }
   try {
     localStorage.setItem('idroid_call_audio_route', callAudioRoute);
   } catch (_) {}
@@ -2642,6 +3949,42 @@ async function handleToggleCallAudioRoute(route?: 'mac' | 'phone') {
   }
 }
 
+async function handleDeleteCallRecord(recordId: string, phoneId?: string, number?: string) {
+  // Optimistically remove from local callHistory immediately
+  callHistory = callHistory.filter((c) => c.id !== recordId && (!phoneId || c.phone_id !== phoneId));
+  try {
+    localStorage.setItem('idroid_call_history', JSON.stringify(callHistory));
+  } catch (_) {}
+  render();
+
+  const invoke = await getInvoke();
+  if (invoke) {
+    try {
+      await invoke('delete_call_record', { id: phoneId || recordId, number });
+    } catch (e) {
+      console.warn('delete_call_record error:', e);
+    }
+  }
+}
+
+async function handleClearAllCallHistory() {
+  if (!confirm('Clear all call history from Mac and synced phone?')) return;
+  callHistory = [];
+  try {
+    localStorage.setItem('idroid_call_history', JSON.stringify([]));
+  } catch (_) {}
+  render();
+
+  const invoke = await getInvoke();
+  if (invoke) {
+    try {
+      await invoke('clear_call_history');
+    } catch (e) {
+      console.warn('clear_call_history error:', e);
+    }
+  }
+}
+
 async function handleStartCall(targetNumber?: string) {
   const inputEl = document.getElementById('input-dialer-number') as HTMLInputElement;
   if (inputEl && targetNumber === undefined) {
@@ -2652,11 +3995,18 @@ async function handleStartCall(targetNumber?: string) {
 
   activeCallTarget = rawNum;
   isCallActive = true;
+  isFloatingKeypadOpen = false;
   callDurationSec = 0;
   isCallMuted = false;
   isCallRecording = false;
   isAddPersonModalOpen = false;
   conferenceParticipants = [];
+
+  // Keep window always-on-top so floating HUD stays visible while working in other apps
+  try {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window');
+    getCurrentWindow().setAlwaysOnTop(true);
+  } catch (_) {}
 
   // Find if contact name exists in favouriteContacts
   const cleanTarget = activeCallTarget.replace(/[\s-]/g, '');
@@ -2679,7 +4029,7 @@ async function handleStartCall(targetNumber?: string) {
     duration: '0s',
   };
 
-  callHistory = [newRecord, ...callHistory.filter((c) => c.id !== newRecord.id).slice(0, 49)];
+  callHistory = [newRecord, ...callHistory.filter((c) => c.id !== newRecord.id).slice(0, 99)];
   try {
     localStorage.setItem('idroid_call_history', JSON.stringify(callHistory));
   } catch (_) {}
@@ -2735,7 +4085,13 @@ async function handleAcceptIncomingCall(number?: string, name?: string) {
     duration: '0s',
   };
 
-  callHistory = [newRecord, ...callHistory.filter((c) => c.id !== newRecord.id).slice(0, 49)];
+  // Keep window always-on-top so floating HUD stays visible while working in other apps
+  try {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window');
+    getCurrentWindow().setAlwaysOnTop(true);
+  } catch (_) {}
+
+  callHistory = [newRecord, ...callHistory.filter((c) => c.id !== newRecord.id).slice(0, 99)];
   try {
     localStorage.setItem('idroid_call_history', JSON.stringify(callHistory));
   } catch (_) {}
@@ -2871,6 +4227,12 @@ async function handleEndCall() {
   activeCallTarget = '';
   activeCallTargetName = '';
   callDurationSec = 0;
+
+  try {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window');
+    getCurrentWindow().setAlwaysOnTop(false);
+  } catch (_) {}
+
   render();
 
   const invoke = await getInvoke();
@@ -2956,6 +4318,41 @@ function updateLiveTelemetryUI() {
       <span style="overflow: hidden; text-overflow: ellipsis;">${hostTelemetry.bluetooth_status || 'Bluetooth On'}</span>
     `;
   }
+
+  const macLocBadge = document.getElementById('btn-mac-location-badge');
+  if (macLocBadge) {
+    macLocBadge.style.background = macLocationEnabled ? 'rgba(56, 189, 248, 0.12)' : 'rgba(255, 255, 255, 0.05)';
+    macLocBadge.style.borderColor = macLocationEnabled ? 'rgba(56, 189, 248, 0.28)' : 'var(--border-subtle)';
+    macLocBadge.style.color = macLocationEnabled ? '#38bdf8' : '#94a3b8';
+    macLocBadge.innerHTML = `
+      ${Icons.Navigation(12, macLocationEnabled ? '#38bdf8' : '#94a3b8')}
+      <span style="overflow: hidden; text-overflow: ellipsis;">${macLocationEnabled ? 'Mac Location On' : 'Mac Location Off'}</span>
+    `;
+  }
+}
+
+function renderApkDownloadModal() {
+  if (!isApkModalOpen) return '';
+  return `
+    <div class="modal-backdrop" id="apk-modal-backdrop" style="position: fixed; inset: 0; background: rgba(0,0,0,0.7); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); z-index: 9999; display: flex; align-items: center; justify-content: center; padding: 20px;">
+      <div class="glass-card" style="width: 100%; max-width: 380px; padding: 28px; background: rgba(18, 18, 22, 0.96); border: 1px solid var(--border-subtle); border-radius: 20px; box-shadow: 0 24px 60px rgba(0,0,0,0.8); text-align: center; position: relative;">
+        <button id="btn-close-apk-modal" style="position: absolute; top: 16px; right: 16px; background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 20px; line-height: 1;">&times;</button>
+        <div style="width: 44px; height: 44px; border-radius: 12px; background: rgba(56,182,255,0.15); color: var(--accent-solar); display: inline-flex; align-items: center; justify-content: center; margin-bottom: 12px;">
+          ${Icons.Download(22, 'currentColor')}
+        </div>
+        <h3 style="font-size: 18px; font-weight: 700; color: #fff; margin: 0 0 6px 0;">Get Idroid for Android</h3>
+        <p style="font-size: 12px; color: var(--text-secondary); margin: 0 0 18px 0; line-height: 1.4;">Scan with your native phone camera to download the APK directly</p>
+        <div style="background: #fff; padding: 12px; border-radius: 16px; display: inline-flex; align-items: center; justify-content: center; margin-bottom: 18px; box-shadow: 0 8px 24px rgba(0,0,0,0.4);">
+          ${downloadQrSvg || ''}
+        </div>
+        <div style="display: flex; gap: 10px; justify-content: center;">
+          <button class="btn-solar" id="btn-copy-apk-url" style="padding: 8px 16px; font-size: 12px;">
+            Copy Download Link
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
 }
 
 // MARK: - Main Render
@@ -2972,27 +4369,23 @@ function render() {
     </header>
     <div class="traffic-lights-cutout"></div>
 
-    <!-- Luxury Obsidian Titanium Sidebar -->
+    <!-- Luxury Obsidian Titanium Sidebar (Only visible when device is connected) -->
+    ${isConnected ? `
     <aside class="sidebar ${isSidebarCollapsed ? 'collapsed' : ''}">
       <div class="brand-header">
         <div class="brand-block">
           <button class="brand-monogram ${isSidebarCollapsed ? 'collapsed-trigger' : ''}" id="btn-brand-monogram" title="${isSidebarCollapsed ? 'Expand sidebar (⌘\\)' : 'Idroid'}" aria-label="${isSidebarCollapsed ? 'Expand sidebar' : 'Idroid'}">
-            <span class="monogram-text">ID</span>
+            <span class="monogram-text" style="display: flex; align-items: center; justify-content: center;">${Icons.BrandLogo(22)}</span>
             <span class="monogram-icon">${Icons.PanelLeftOpen(16, 'currentColor')}</span>
           </button>
           <div class="brand-title-wrap">
             <span class="brand-title">Idroid</span>
-            <span class="brand-badge">Flagship</span>
           </div>
         </div>
         <div class="brand-actions">
-          <button class="btn-luxury" id="btn-open-doctor-sidebar" title="Open Idroid Doctor & Help" style="padding: 2.5px 7px; font-size: 10.5px; border-radius: 6px; color: var(--accent-solar); border-color: rgba(255,110,50,0.3); display: flex; align-items: center; gap: 4px; cursor: pointer;">
-            ${Icons.Doctor(12, 'var(--accent-solar)')}
-            <span>Doctor</span>
-          </button>
           <div class="latency-beacon" title="Connection Status">
-            <div class="latency-dot" style="background: ${isConnected ? 'var(--emerald-ion)' : 'var(--text-muted)'};"></div>
-            <span>${isConnected ? 'Online' : 'Offline'}</span>
+            <div class="latency-dot" style="background: var(--emerald-ion);"></div>
+            <span>Online</span>
           </div>
           <button class="sidebar-toggle-btn" id="btn-toggle-sidebar" title="Collapse sidebar (⌘\\)" aria-label="Collapse Sidebar">
             ${Icons.PanelLeftClose(15, 'currentColor')}
@@ -3001,61 +4394,72 @@ function render() {
       </div>
 
       <!-- Connected Device Capsule (Interactive Link to Wireless Studio) -->
-      <div class="device-capsule" id="btn-device-capsule" style="cursor: pointer;" title="${isSidebarCollapsed ? (isConnected ? `${device.name} • ${device.battery}%` : 'Pair device wirelessly') : 'Open Wireless & Remote Connection Studio'}">
-        <div class="device-avatar" style="color: ${isConnected ? 'var(--accent-solar)' : 'var(--text-muted)'};">
+      <div class="device-capsule" id="btn-device-capsule" style="cursor: pointer;" title="${isSidebarCollapsed ? `${device.name} • ${device.battery}%` : 'Open Wireless & Remote Connection Studio'}">
+        <div class="device-avatar" style="color: var(--accent-solar);">
           ${Icons.Phone(18, 'currentColor')}
         </div>
         <div class="device-details">
-          <div class="device-name" style="color: ${isConnected ? 'var(--text-pure)' : 'var(--text-secondary)'};">
-            ${isConnected ? device.name : 'No Device Connected'}
+          <div class="device-name" style="color: var(--text-pure);">
+            ${device.name}
           </div>
           <div class="device-telemetry-line">
             <span id="device-battery-label" style="display:inline-flex; align-items:center; gap:4px;">
               ${
-                isConnected
-                  ? `${
-                      device.connectionType.includes('Wi-Fi')
-                        ? Icons.Wifi(11, 'var(--accent-solar)')
-                        : device.connectionType.includes('Remote') || device.connectionType.includes('Mesh')
-                        ? Icons.Globe(11, 'var(--purple-neon)')
-                        : Icons.Usb(11, 'var(--emerald-ion)')
-                    } <span>${device.connectionType}</span> • ${Icons.BatteryCharging(11, 'var(--emerald-ion)')} <span>${device.battery}%</span>`
-                  : `<span style="color: var(--text-muted);">Click to pair wirelessly</span>`
-              }
+                device.connectionType.includes('Wi-Fi')
+                  ? Icons.Wifi(11, 'var(--accent-solar)')
+                  : device.connectionType.includes('Remote') || device.connectionType.includes('Mesh')
+                  ? Icons.Globe(11, 'var(--purple-neon)')
+                  : Icons.Usb(11, 'var(--emerald-ion)')
+              } <span>${device.connectionType}</span> • ${Icons.BatteryCharging(11, 'var(--emerald-ion)')} <span>${device.battery}%</span>
             </span>
           </div>
         </div>
       </div>
 
-      <!-- Navigation List (Psychologically Ordered Hierarchy) -->
+      <!-- Navigation List (Only available when device is connected) -->
       <nav class="nav-list" style="margin-top: 8px;">
         ${renderNavItem('dashboard', Icons.Dashboard(16), 'Dashboard')}
         ${renderNavItem('mirror', Icons.Mirror(16), 'Screen Mirror')}
         ${renderNavItem('camera', Icons.Camera(16), 'Camera Stream')}
         ${renderNavItem('files', Icons.Files(16), 'Files')}
         ${renderNavItem('photos', Icons.Photos(16), 'Photos')}
-        ${renderNavItem('calls', Icons.Calls(16), 'Calls & Audio')}
+        ${renderNavItem('calls', Icons.Calls(16), 'Calls')}
         ${renderNavItem('notifications', Icons.Notifications(16), 'Notifications')}
         ${renderNavItem('clipboard', Icons.Clipboard(16), 'Clipboard')}
       </nav>
 
-      <!-- Bottom Pinned Settings -->
-      ${renderNavItem('settings', Icons.Settings(16), 'Settings')}
+      <!-- Bottom Pinned Settings & Doctor -->
+      <div class="sidebar-footer" style="display: flex; align-items: center; gap: 8px; padding: 0 4px; margin-top: auto;">
+        <div style="flex: 1;">
+          ${renderNavItem('settings', Icons.Settings(16), 'Settings')}
+        </div>
+        <button class="btn-icon" id="btn-open-doctor-sidebar" title="Open Idroid Doctor & Help" style="width: 36px; height: 36px; border-radius: var(--radius-sm); border: 1px solid var(--border-subtle); background: rgba(255,255,255,0.03); color: var(--text-secondary); display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all 0.2s ease;">
+          ${Icons.Doctor(15, 'currentColor')}
+        </button>
+      </div>
     </aside>
+    ` : ''}
 
     <!-- Main Content Canvas -->
-    <main class="main-content">
+    <main class="main-content ${!isConnected ? 'full-onboarding-canvas' : ''}">
       ${renderActiveWorkspace()}
     </main>
 
     ${renderWirelessModal()}
     ${renderIdroidDoctorModal()}
+    ${renderApkDownloadModal()}
     ${renderQuickAppsModal()}
     ${renderQuickControlsModal()}
+    ${renderMacBluetoothModal()}
+    ${renderPhoneBluetoothModal()}
+    ${renderPhoneWifiModal()}
     ${renderLightboxModal()}
     ${renderAddFavouriteModal()}
+    ${renderFloatingKeypadModal()}
+    ${renderContactsDirectoryModal()}
     ${renderFloatingCallHUD()}
     ${renderIncomingCallBanner()}
+    ${renderDeviceAuthModal()}
   `;
 
   attachEventListeners();
@@ -3086,7 +4490,7 @@ function renderWirelessModal() {
       <div class="modal-window">
         <div class="modal-header">
           <div style="display: flex; align-items: center; gap: 10px;">
-            <div style="width: 34px; height: 34px; border-radius: 10px; background: rgba(255, 110, 50, 0.15); color: var(--accent-solar); display: flex; align-items: center; justify-content: center;">
+            <div style="width: 34px; height: 34px; border-radius: 10px; background: rgba(56, 182, 255, 0.15); color: var(--accent-solar); display: flex; align-items: center; justify-content: center;">
               ${Icons.Wifi(18, 'currentColor')}
             </div>
             <div>
@@ -3123,6 +4527,7 @@ function renderWirelessModal() {
     </div>
   `;
 }
+
 
 // MARK: - Idroid Doctor & Diagnostic Help Center Modal
 function renderIdroidDoctorModal() {
@@ -3181,7 +4586,7 @@ function renderIdroidDoctorModal() {
       content: `
         <div style="font-size: 12.5px; line-height: 1.6; color: var(--text-secondary);">
           <p>Many Wi-Fi routers include a security setting called <em>Client Isolation</em> or <em>AP Isolation</em>. While this protects public networks, it prevents your phone and Mac from discovering each other on local port 53100.</p>
-          <div style="margin-top: 8px; padding: 10px; background: rgba(255,110,50,0.08); border-radius: 8px; border: 1px solid rgba(255,110,50,0.2);">
+          <div style="margin-top: 8px; padding: 10px; background: rgba(56,182,255,0.08); border-radius: 8px; border: 1px solid rgba(56,182,255,0.2);">
             <strong style="color: var(--accent-solar);">Quick Solution:</strong> Connect via <strong>Personal Hotspot</strong> or plug in a <strong>USB cable</strong> for 1 second.
           </div>
         </div>
@@ -3228,13 +4633,13 @@ function renderIdroidDoctorModal() {
         <!-- Modal Header -->
         <div style="padding: 20px 24px; border-bottom: 1px solid rgba(255,255,255,0.06); display: flex; align-items: center; justify-content: space-between;">
           <div style="display: flex; align-items: center; gap: 12px;">
-            <div style="width: 38px; height: 38px; border-radius: 12px; background: rgba(255,110,50,0.15); color: var(--accent-solar); display: flex; align-items: center; justify-content: center;">
+            <div style="width: 38px; height: 38px; border-radius: 12px; background: rgba(56,182,255,0.15); color: var(--accent-solar); display: flex; align-items: center; justify-content: center;">
               ${Icons.Doctor(20, 'var(--accent-solar)')}
             </div>
             <div>
               <div style="display: flex; align-items: center; gap: 8px;">
                 <h2 style="font-size: 16px; font-weight: 700; color: #fff; margin: 0;">Idroid Doctor & Help Center</h2>
-                <span style="font-size: 10px; font-weight: 700; background: rgba(255,110,50,0.2); color: var(--accent-solar); padding: 2px 7px; border-radius: 6px;">DIAGNOSTICS</span>
+                <span style="font-size: 10px; font-weight: 700; background: rgba(56,182,255,0.2); color: var(--accent-solar); padding: 2px 7px; border-radius: 6px;">DIAGNOSTICS</span>
               </div>
               <p style="font-size: 11.5px; color: var(--text-secondary); margin: 2px 0 0 0;">Connection health, speed optimization & friendly troubleshooting</p>
             </div>
@@ -3269,7 +4674,7 @@ function renderIdroidDoctorModal() {
                   <span style="width: 7px; height: 7px; border-radius: 50%; background: var(--emerald-ion);"></span>
                   <span style="font-size: 11px; font-weight: 600; color: #fff;">Mac Network</span>
                 </div>
-                <div style="font-size: 10.5px; color: var(--text-secondary);">${pairingPayload?.ip ? 'Online (' + pairingPayload.ip + ')' : 'Ready'}</div>
+                <div style="font-size: 10.5px; color: var(--text-secondary); margin-top: 3px;">${pairingPayload?.ip ? renderPrivacyMask(pairingPayload.ip, undefined, { prefix: 'Online' }) : 'Ready'}</div>
               </div>
 
               <div style="background: rgba(255,255,255,0.03); border: 1px solid var(--border-subtle); border-radius: 10px; padding: 10px 12px;">
@@ -3277,7 +4682,7 @@ function renderIdroidDoctorModal() {
                   <span style="width: 7px; height: 7px; border-radius: 50%; background: var(--emerald-ion);"></span>
                   <span style="font-size: 11px; font-weight: 600; color: #fff;">Pairing Port</span>
                 </div>
-                <div style="font-size: 10.5px; color: var(--text-secondary);">Listening on Port 53100</div>
+                <div style="font-size: 10.5px; color: var(--text-secondary); margin-top: 3px;">Listening &bull; <span class="privacy-mask-pill" data-raw-val="${pairingPayload?.port || 53100}" title="Hover to view • Click to copy"><span class="mask-dots">Port •••••</span><span class="mask-real">Port ${pairingPayload?.port || 53100}</span><span class="mask-copied-notice">Copied!</span><span class="mask-icon">${Icons.Eye(12, 'currentColor')}</span></span></div>
               </div>
 
               <div style="background: rgba(255,255,255,0.03); border: 1px solid var(--border-subtle); border-radius: 10px; padding: 10px 12px;">
@@ -3291,7 +4696,7 @@ function renderIdroidDoctorModal() {
           </div>
 
           <!-- Spotlight: Hotspot Advantage Card -->
-          <div style="background: linear-gradient(135deg, rgba(255,110,50,0.12), rgba(255,110,50,0.03)); border: 1.5px solid rgba(255,110,50,0.3); border-radius: 14px; padding: 16px;">
+          <div style="background: linear-gradient(135deg, rgba(56,182,255,0.12), rgba(56,182,255,0.03)); border: 1.5px solid rgba(56,182,255,0.3); border-radius: 14px; padding: 16px;">
             <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px;">
               <div style="width: 28px; height: 28px; border-radius: 8px; background: var(--accent-solar); color: #000; display: flex; align-items: center; justify-content: center;">
                 ${Icons.Zap(16, '#000')}
@@ -3320,10 +4725,10 @@ function renderIdroidDoctorModal() {
               ${filteredFaqs.map(faq => {
                 const isExpanded = doctorExpandedFaq === faq.id;
                 return `
-                  <div class="doctor-topic-card" data-faq-id="${faq.id}" style="background: rgba(255,255,255,0.02); border: 1px solid ${isExpanded ? 'rgba(255,110,50,0.3)' : 'var(--border-subtle)'}; border-radius: 12px; overflow: hidden; cursor: pointer; transition: all 0.2s ease;">
+                  <div class="doctor-topic-card" data-faq-id="${faq.id}" style="background: rgba(255,255,255,0.02); border: 1px solid ${isExpanded ? 'rgba(56,182,255,0.3)' : 'var(--border-subtle)'}; border-radius: 12px; overflow: hidden; cursor: pointer; transition: all 0.2s ease;">
                     <div style="padding: 14px 16px; display: flex; align-items: center; justify-content: space-between; gap: 12px;">
                       <div style="display: flex; align-items: center; gap: 10px;">
-                        <span style="font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 5px; background: ${isExpanded ? 'rgba(255,110,50,0.2)' : 'rgba(255,255,255,0.06)'}; color: ${isExpanded ? 'var(--accent-solar)' : 'var(--text-secondary)'};">
+                        <span style="font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 5px; background: ${isExpanded ? 'rgba(56,182,255,0.2)' : 'rgba(255,255,255,0.06)'}; color: ${isExpanded ? 'var(--accent-solar)' : 'var(--text-secondary)'};">
                           ${faq.badge}
                         </span>
                         <span style="font-size: 13px; font-weight: 600; color: #fff;">${faq.title}</span>
@@ -3386,7 +4791,7 @@ function renderWirelessModalBody() {
 
         ${
           wirelessStatusMsg
-            ? `<div style="font-size: 12px; padding: 10px 14px; border-radius: 8px; background: rgba(255,110,50,0.1); border: 1px solid rgba(255,110,50,0.3); color: #fff; line-height: 1.4;">${wirelessStatusMsg}</div>`
+            ? `<div style="font-size: 12px; padding: 10px 14px; border-radius: 8px; background: rgba(56,182,255,0.1); border: 1px solid rgba(56,182,255,0.3); color: #fff; line-height: 1.4;">${wirelessStatusMsg}</div>`
             : ''
         }
 
@@ -3435,7 +4840,7 @@ function renderWirelessModalBody() {
 
         ${
           wirelessStatusMsg
-            ? `<div style="font-size: 12px; padding: 10px 14px; border-radius: 8px; background: rgba(255,110,50,0.1); border: 1px solid rgba(255,110,50,0.3); color: #fff;">${wirelessStatusMsg}</div>`
+            ? `<div style="font-size: 12px; padding: 10px 14px; border-radius: 8px; background: rgba(56,182,255,0.1); border: 1px solid rgba(56,182,255,0.3); color: #fff;">${wirelessStatusMsg}</div>`
             : ''
         }
 
@@ -3478,7 +4883,7 @@ function renderWirelessModalBody() {
 
       ${
         wirelessStatusMsg
-          ? `<div style="font-size: 12px; padding: 10px 14px; border-radius: 8px; background: rgba(255,110,50,0.1); border: 1px solid rgba(255,110,50,0.3); color: #fff;">${wirelessStatusMsg}</div>`
+          ? `<div style="font-size: 12px; padding: 10px 14px; border-radius: 8px; background: rgba(56,182,255,0.1); border: 1px solid rgba(56,182,255,0.3); color: #fff;">${wirelessStatusMsg}</div>`
           : ''
       }
 
@@ -3491,6 +4896,10 @@ function renderWirelessModalBody() {
 }
 
 function renderActiveWorkspace() {
+  const isConnected = device.status === 'Connected';
+  if (!isConnected && currentSection !== 'settings') {
+    return renderDashboard();
+  }
   switch (currentSection) {
     case 'dashboard':
       return renderDashboard();
@@ -3547,7 +4956,7 @@ function renderCameraStudio() {
               <span>Bring Video Window to Front</span>
             </button>
           ` : `
-            <button class="btn-luxury" id="btn-mirror-camera-app" style="background: rgba(255,110,50,0.15); color: var(--accent-solar); border: 1px solid rgba(255,110,50,0.3); font-weight: 600; border-radius: 10px; padding: 7px 14px; font-size: 12px; display: flex; align-items: center; gap: 6px; cursor: pointer;">
+            <button class="btn-luxury" id="btn-mirror-camera-app" style="background: rgba(56,182,255,0.15); color: var(--accent-solar); border: 1px solid rgba(56,182,255,0.3); font-weight: 600; border-radius: 10px; padding: 7px 14px; font-size: 12px; display: flex; align-items: center; gap: 6px; cursor: pointer;">
               ${Icons.Camera(14, 'var(--accent-solar)')}
               <span>Launch Phone Camera</span>
             </button>
@@ -3607,7 +5016,7 @@ function renderCameraStudio() {
             </button>
           </div>
         ` : `
-          <div style="width: 56px; height: 56px; border-radius: 50%; background: rgba(255, 110, 50, 0.12); display: flex; align-items: center; justify-content: center; color: var(--accent-solar); margin-bottom: 14px;">
+          <div style="width: 56px; height: 56px; border-radius: 50%; background: rgba(56, 182, 255, 0.12); display: flex; align-items: center; justify-content: center; color: var(--accent-solar); margin-bottom: 14px;">
             ${Icons.Camera(28, 'currentColor')}
           </div>
           <div style="font-size: 18px; font-weight: 700; color: #fff; margin-bottom: 6px;">Continuity Camera in Standby</div>
@@ -3667,123 +5076,94 @@ function renderCameraStudio() {
 
 function renderConsumerQrPairingView() {
   return `
-    <div style="display: flex; flex-direction: column; gap: 24px; margin-top: 10px;">
-      <!-- 3 Connection Ways Cards -->
-      <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px;">
-        <!-- Hotspot Option (Recommended) -->
-        <div style="background: rgba(255,110,50,0.06); border: 1.5px solid rgba(255,110,50,0.35); border-radius: 14px; padding: 14px; position: relative;">
-          <div style="position: absolute; top: -10px; right: 12px; background: var(--accent-solar); color: #000; font-size: 9.5px; font-weight: 800; padding: 2px 8px; border-radius: 10px; text-transform: uppercase; letter-spacing: 0.5px;">Recommended</div>
-          <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
-            <span style="color: var(--accent-solar);">${Icons.Zap(15, 'currentColor')}</span>
-            <span style="font-size: 13px; font-weight: 700; color: #fff;">Personal Hotspot</span>
+    <div style="display: grid; grid-template-columns: 1.15fr 0.85fr; gap: 32px; align-items: center;">
+      <!-- Left Column: Simple Guidance & Status -->
+      <div style="display: flex; flex-direction: column; gap: 16px;">
+        <div>
+          <div style="display: flex; align-items: center; margin-bottom: 8px;">
+            <div style="display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 20px; background: rgba(52, 211, 153, 0.1); border: 1px solid rgba(52, 211, 153, 0.25); color: #34d399; font-size: 11px; font-weight: 600; letter-spacing: 0.3px;">
+              <span style="width: 6px; height: 6px; border-radius: 50%; background: #34d399; box-shadow: 0 0 6px #34d399; display: inline-block;"></span>
+              Ready to Connect
+            </div>
           </div>
-          <p style="font-size: 11.5px; color: var(--text-secondary); line-height: 1.4; margin: 0;">
-            Turn phone Hotspot on & connect Mac Wi-Fi. <strong>&lt;2ms response</strong>, 0 router isolation. Uses 0 cellular data.
+          <h2 style="font-size: 20px; font-weight: 700; color: #fff; margin: 0 0 4px 0; letter-spacing: -0.3px;">Scan with Idroid App</h2>
+          <p style="font-size: 12.5px; color: var(--text-secondary); margin: 0; line-height: 1.4;">
+            Open Idroid on your Android phone and point your camera at this QR code.
           </p>
         </div>
 
-        <!-- Home Wi-Fi Option -->
-        <div style="background: rgba(255,255,255,0.02); border: 1px solid var(--border-subtle); border-radius: 14px; padding: 14px;">
-          <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
-            <span style="color: var(--text-pure);">${Icons.Wifi(15, 'currentColor')}</span>
-            <span style="font-size: 13px; font-weight: 700; color: #fff;">Home / Office Wi-Fi</span>
+        <!-- 3 Quick Micro-Steps -->
+        <div style="display: flex; flex-direction: column; gap: 10px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-subtle); border-radius: 12px; padding: 12px 14px;">
+          <div style="display: flex; gap: 10px; align-items: center;">
+            <div style="width: 20px; height: 20px; border-radius: 50%; background: rgba(56,182,255,0.15); color: var(--accent-solar); display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 10.5px; flex-shrink: 0;">1</div>
+            <div style="font-size: 12px; color: #e2e8f0;">Open <strong>Idroid</strong> on your Android phone</div>
           </div>
-          <p style="font-size: 11.5px; color: var(--text-secondary); line-height: 1.4; margin: 0;">
-            Both Mac and phone on the same Wi-Fi. Note: some office/guest routers block peer devices.
-          </p>
+          <div style="display: flex; gap: 10px; align-items: center;">
+            <div style="width: 20px; height: 20px; border-radius: 50%; background: rgba(56,182,255,0.15); color: var(--accent-solar); display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 10.5px; flex-shrink: 0;">2</div>
+            <div style="font-size: 12px; color: #e2e8f0;">Tap <strong>"Scan to Connect"</strong></div>
+          </div>
+          <div style="display: flex; gap: 10px; align-items: center;">
+            <div style="width: 20px; height: 20px; border-radius: 50%; background: rgba(56,182,255,0.15); color: var(--accent-solar); display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 10.5px; flex-shrink: 0;">3</div>
+            <div style="font-size: 12px; color: #e2e8f0;">Point camera at this screen to pair</div>
+          </div>
         </div>
 
-        <!-- USB Cable Option -->
-        <div style="background: rgba(255,255,255,0.02); border: 1px solid var(--border-subtle); border-radius: 14px; padding: 14px;">
-          <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
-            <span style="color: var(--emerald-ion);">${Icons.Check(15, 'currentColor')}</span>
-            <span style="font-size: 13px; font-weight: 700; color: #fff;">USB Cable Backup</span>
+        <!-- Clean Connection Mode Badges -->
+        <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+          <div style="display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border-radius: 6px; background: rgba(56,182,255,0.08); border: 1px solid rgba(56,182,255,0.2); font-size: 11px; color: var(--accent-solar); font-weight: 500;" title="Connect via Personal Hotspot for ultra-low latency">
+            ${Icons.Zap(12, 'currentColor')} Hotspot &lt;2ms
           </div>
-          <p style="font-size: 11.5px; color: var(--text-secondary); line-height: 1.4; margin: 0;">
-            Plug in a USB-C cable for instant fallback. Works 100% offline without any network needed.
-          </p>
+          <div style="display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border-radius: 6px; background: rgba(56, 189, 248, 0.08); border: 1px solid rgba(56, 189, 248, 0.2); font-size: 11px; color: #38bdf8; font-weight: 500;" title="Both devices on the same Wi-Fi">
+            ${Icons.Wifi(12, 'currentColor')} Wi-Fi
+          </div>
+          <div style="display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border-radius: 6px; background: rgba(52, 211, 153, 0.08); border: 1px solid rgba(52, 211, 153, 0.2); font-size: 11px; color: #34d399; font-weight: 500;" title="Works offline with USB-C cable">
+            ${Icons.Check(12, 'currentColor')} USB-C Instant
+          </div>
+        </div>
+
+        <!-- Action Buttons -->
+        <div style="display: flex; gap: 10px; align-items: center; margin-top: 2px;">
+          <button class="btn-luxury" id="btn-regenerate-pairing-qr" style="padding: 6px 14px; font-size: 11.5px;">
+            ${Icons.Refresh(13, 'currentColor')}
+            <span>Refresh QR</span>
+          </button>
+          <button class="btn-luxury" id="btn-copy-pairing-link" style="padding: 6px 14px; font-size: 11.5px;">
+            ${Icons.Copy(13, 'currentColor')}
+            <span>Copy Link</span>
+          </button>
         </div>
       </div>
 
-      <!-- Pairing & QR Scanning Section -->
-      <div style="display: grid; grid-template-columns: 1.25fr 1fr; gap: 32px; align-items: center;">
-        <!-- Left Column: Steps -->
-        <div style="display: flex; flex-direction: column; gap: 16px;">
-          <div style="display: flex; gap: 14px; align-items: flex-start;">
-            <div style="width: 30px; height: 30px; border-radius: 8px; background: rgba(255,110,50,0.15); color: var(--accent-solar); display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 12px; flex-shrink: 0;">1</div>
-            <div>
-              <div style="font-size: 14px; font-weight: 600; color: #fff;">Open Idroid on your Android Phone</div>
-              <div style="font-size: 12px; color: var(--text-secondary); margin-top: 2px; line-height: 1.4;">
-                No cables, root, or developer options needed.
-              </div>
-            </div>
-          </div>
-
-          <div style="display: flex; gap: 14px; align-items: flex-start;">
-            <div style="width: 30px; height: 30px; border-radius: 8px; background: rgba(255,110,50,0.15); color: var(--accent-solar); display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 12px; flex-shrink: 0;">2</div>
-            <div>
-              <div style="font-size: 14px; font-weight: 600; color: #fff;">Tap "Scan to Connect"</div>
-              <div style="font-size: 12px; color: var(--text-secondary); margin-top: 2px; line-height: 1.4;">
-                Point your phone camera at this QR code to connect instantly.
-              </div>
-            </div>
-          </div>
-
-          <div style="display: flex; gap: 14px; align-items: flex-start;">
-            <div style="width: 30px; height: 30px; border-radius: 8px; background: rgba(255,110,50,0.15); color: var(--accent-solar); display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 12px; flex-shrink: 0;">3</div>
-            <div>
-              <div style="font-size: 14px; font-weight: 600; color: #fff;">Tap "Allow" on Phone</div>
-              <div style="font-size: 12px; color: var(--text-secondary); margin-top: 2px; line-height: 1.4;">
-                The companion handshake links both devices immediately.
-              </div>
-            </div>
-          </div>
-
-          <!-- Idroid Doctor Callout Banner -->
-          <div style="background: rgba(255,255,255,0.03); border: 1px solid var(--border-subtle); border-radius: 12px; padding: 12px 16px; display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 4px;">
-            <div style="display: flex; align-items: center; gap: 10px;">
-              <div style="width: 32px; height: 32px; border-radius: 8px; background: rgba(255,110,50,0.15); color: var(--accent-solar); display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
-                ${Icons.Doctor(16, 'var(--accent-solar)')}
-              </div>
-              <div>
-                <div style="font-size: 12px; font-weight: 600; color: #fff;">Having Trouble or Stuck Scanning?</div>
-                <div style="font-size: 11px; color: var(--text-secondary);">Idroid Doctor diagnoses router blocks and speeds up pairing</div>
-              </div>
-            </div>
-            <button class="btn-luxury" id="btn-open-doctor-pairing" style="padding: 5px 12px; font-size: 11px; color: var(--accent-solar); border-color: rgba(255,110,50,0.3); white-space: nowrap; cursor: pointer;">
-              Open Doctor
-            </button>
-          </div>
+      <!-- Right Column: Hero High-Contrast QR Code Card -->
+      <div style="display: flex; flex-direction: column; align-items: center; justify-content: center;">
+        <div style="background: #ffffff; padding: 14px; border-radius: 18px; box-shadow: 0 16px 44px rgba(0,0,0,0.6), 0 0 28px rgba(56,182,255,0.18); display: flex; align-items: center; justify-content: center; position: relative;">
+          ${pairingQrSvg || '<div style="width: 196px; height: 196px; display: flex; align-items: center; justify-content: center; color: #333; font-size: 12px;">Generating QR...</div>'}
         </div>
-
-        <!-- Right Column: Crisp Dynamic QR Code Display -->
-        <div style="display: flex; flex-direction: column; align-items: center; gap: 14px;">
-          <div style="background: #ffffff; padding: 14px; border-radius: 20px; box-shadow: 0 14px 40px rgba(0,0,0,0.6), 0 0 28px rgba(255,110,50,0.25); display: flex; align-items: center; justify-content: center; position: relative;">
-            ${pairingQrSvg || '<div style="width: 196px; height: 196px; display: flex; align-items: center; justify-content: center; color: #333; font-size: 12px;">Generating QR...</div>'}
-          </div>
-
-          <div style="display: flex; gap: 10px; align-items: center;">
-            <button class="btn-luxury" id="btn-regenerate-pairing-qr" style="padding: 6px 14px; font-size: 11.5px;">
-              ${Icons.Refresh(13, 'currentColor')}
-              <span>Refresh QR</span>
-            </button>
-            <button class="btn-luxury" id="btn-copy-pairing-link" style="padding: 6px 14px; font-size: 11.5px;">
-              ${Icons.Copy(13, 'currentColor')}
-              <span>Copy Link</span>
-            </button>
-          </div>
-
-          <!-- Download APK Helper -->
-          <div style="display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-radius: 12px; background: rgba(255,255,255,0.02); border: 1px solid var(--border-subtle); width: 100%; max-width: 290px;">
-            <div style="background: #fff; padding: 4px; border-radius: 8px; flex-shrink: 0; display: flex; align-items: center; justify-content: center;">
-              ${downloadQrSvg || ''}
-            </div>
-            <div>
-              <div style="font-size: 11.5px; font-weight: 600; color: #fff;">Need the Android App?</div>
-              <div style="font-size: 10.5px; color: var(--text-secondary); line-height: 1.35; margin-top: 2px;">Scan with your native phone camera to download APK directly</div>
-            </div>
-          </div>
+        <div style="display: flex; align-items: center; gap: 6px; margin-top: 10px; font-size: 11.5px; background: rgba(255, 255, 255, 0.04); padding: 4px 10px; border-radius: 8px; border: 1px solid var(--border-subtle);">
+          <span style="width: 7px; height: 7px; border-radius: 50%; background: #34d399; box-shadow: 0 0 8px #34d399; flex-shrink: 0;"></span>
+          <span style="color: #94a3b8;">${pairingPayload.ssid ? 'Wi-Fi (' + pairingPayload.ssid + '):' : 'Wi-Fi:'}</span>
+          ${renderPrivacyMask(pairingPayload.ip, pairingPayload.port)}
         </div>
+        <div style="font-size: 11px; color: var(--text-muted); text-align: center; margin-top: 6px;">
+          Auto-pairs over local Wi-Fi, Hotspot, or USB
+        </div>
+      </div>
+    </div>
+
+    <!-- Clean Unobtrusive Footer Bar -->
+    <div style="margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--border-subtle); display: flex; justify-content: space-between; align-items: center; font-size: 11.5px; color: var(--text-muted); flex-wrap: wrap; gap: 10px;">
+      <div style="display: flex; align-items: center; gap: 6px;">
+        <span>Don't have the mobile app yet?</span>
+        <button id="btn-open-download-modal" style="background: none; border: none; padding: 0; color: var(--accent-solar); font-size: 11.5px; font-weight: 600; cursor: pointer; text-decoration: underline;">
+          Get Android APK
+        </button>
+      </div>
+      <div style="display: flex; align-items: center; gap: 6px;">
+        <span>Trouble connecting?</span>
+        <button id="btn-open-doctor-pairing" style="background: none; border: none; padding: 0; color: var(--text-secondary); font-size: 11.5px; font-weight: 500; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;">
+          ${Icons.Doctor(13, 'var(--accent-solar)')}
+          <span style="color: var(--accent-solar); font-weight: 600;">Open Network Doctor</span>
+        </button>
       </div>
     </div>
   `;
@@ -3859,26 +5239,92 @@ function renderDashboard() {
     }
 
     return `
-      <div class="workspace-header">
-        <div class="workspace-title-box">
-          <h1>Dashboard</h1>
-          <p>Command Deck & Hardware Status</p>
-        </div>
-      </div>
-
-      <!-- Consumer-First Pairing Studio -->
-      <div class="glass-card" style="padding: 32px; margin-top: 14px; position: relative;">
-        <div style="margin-bottom: 24px;">
-          <div style="display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 20px; background: rgba(255, 110, 50, 0.12); border: 1px solid rgba(255, 110, 50, 0.25); color: var(--accent-solar); font-size: 11px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase;">
-            ${Icons.Wifi(12, 'currentColor')} Wi-Fi On-the-Air Link
+      <div class="onboarding-screen-container">
+        <!-- Full-Screen Onboarding Top Navigation & Doctor Bar -->
+        <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 4px; margin-bottom: 2px;">
+          <div style="display: flex; align-items: center; gap: 14px;">
+            <div style="width: 40px; height: 40px; border-radius: 12px; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); display: flex; align-items: center; justify-content: center; box-shadow: 0 4px 16px rgba(0,0,0,0.35);">
+              ${Icons.BrandLogo(26)}
+            </div>
+            <div>
+              <div style="display: flex; align-items: center; gap: 10px;">
+                <span style="font-size: 18px; font-weight: 800; color: #fff; letter-spacing: -0.4px;">Idroid</span>
+                <span style="font-size: 10px; font-weight: 700; background: rgba(52, 211, 153, 0.12); border: 1px solid rgba(52, 211, 153, 0.28); color: #34d399; padding: 2.5px 8px; border-radius: 12px; display: inline-flex; align-items: center; gap: 5px;">
+                  <span style="width: 5px; height: 5px; border-radius: 50%; background: #34d399; box-shadow: 0 0 6px #34d399;"></span>
+                  Ready to Connect
+                </span>
+              </div>
+              <div style="font-size: 11.5px; color: var(--text-muted); margin-top: 2px;">Universal Apple & Android Continuity</div>
+            </div>
           </div>
-          <h2 style="font-size: 22px; font-weight: 700; color: #fff; margin-top: 8px;">Connect Your Android Phone</h2>
-          <p style="font-size: 13px; color: var(--text-secondary); margin-top: 4px;">
-            Scan the QR code with the Idroid app on your phone to link wirelessly over Wi-Fi on-the-air.
-          </p>
+
+          <!-- Quick Action Buttons -->
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <button class="btn-luxury" id="btn-open-doctor-onboarding" style="padding: 7px 15px; font-size: 12px; gap: 7px; border-color: rgba(56,182,255,0.3); background: rgba(56,182,255,0.08); color: var(--accent-solar);" title="Open Idroid Doctor & Diagnostic Help">
+              ${Icons.Doctor(14, 'var(--accent-solar)')}
+              <span style="font-weight: 600;">Idroid Doctor</span>
+            </button>
+            <button class="btn-luxury" id="btn-open-download-onboarding" style="padding: 7px 15px; font-size: 12px; gap: 7px;" title="Download Android Companion APK">
+              ${Icons.Download(13, 'currentColor')}
+              <span>Get Android App</span>
+            </button>
+          </div>
         </div>
 
-        ${renderConsumerQrPairingView()}
+        <!-- Primary Pairing Hero Card -->
+        <div class="glass-card" style="padding: 24px 28px; position: relative;">
+          ${renderConsumerQrPairingView()}
+        </div>
+
+        <!-- Integrated Idroid Doctor & Connection Health Hub -->
+        <div class="glass-card" style="padding: 18px 24px; background: rgba(18, 19, 22, 0.65); border: 1px solid rgba(255,255,255,0.08); border-radius: 16px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span style="display: flex; align-items: center; color: var(--accent-solar);">${Icons.Doctor(15, 'var(--accent-solar)')}</span>
+              <span style="font-size: 12.5px; font-weight: 700; color: #fff; letter-spacing: -0.2px;">Idroid Doctor & Quick Diagnostics</span>
+              <span style="font-size: 9.5px; font-weight: 700; background: rgba(56, 182, 255, 0.15); color: #38b6ff; padding: 2px 6px; border-radius: 5px; text-transform: uppercase;">Realtime</span>
+            </div>
+            <button id="btn-open-doctor-pairing" style="background: none; border: none; padding: 0; color: var(--accent-solar); font-size: 11.5px; font-weight: 600; cursor: pointer; text-decoration: underline;">
+              Open Interactive Diagnostics Suite &rarr;
+            </button>
+          </div>
+
+          <!-- 3 Live Health Badges -->
+          <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 12px;">
+            <div style="background: rgba(255,255,255,0.025); border: 1px solid rgba(255,255,255,0.06); border-radius: 10px; padding: 10px 12px; display: flex; align-items: center; gap: 10px;">
+              <span style="width: 8px; height: 8px; border-radius: 50%; background: #34d399; box-shadow: 0 0 6px #34d399; flex-shrink: 0;"></span>
+              <div>
+                <div style="font-size: 11.5px; font-weight: 600; color: #fff;">Mac Network Ready</div>
+                <div style="font-size: 10.5px; color: var(--text-muted);">Local interface online</div>
+              </div>
+            </div>
+
+            <div style="background: rgba(255,255,255,0.025); border: 1px solid rgba(255,255,255,0.06); border-radius: 10px; padding: 10px 12px; display: flex; align-items: center; gap: 10px;">
+              <span style="width: 8px; height: 8px; border-radius: 50%; background: #38bdf8; box-shadow: 0 0 6px #38bdf8; flex-shrink: 0;"></span>
+              <div>
+                <div style="font-size: 11.5px; font-weight: 600; color: #fff;">Port 53100 Listening</div>
+                <div style="font-size: 10.5px; color: var(--text-muted);">P2P discovery engine</div>
+              </div>
+            </div>
+
+            <div style="background: rgba(255,255,255,0.025); border: 1px solid rgba(255,255,255,0.06); border-radius: 10px; padding: 10px 12px; display: flex; align-items: center; gap: 10px;">
+              <span style="color: var(--accent-solar); flex-shrink: 0;">${Icons.Zap(14, 'var(--accent-solar)')}</span>
+              <div>
+                <div style="font-size: 11.5px; font-weight: 600; color: #fff;">Hotspot Recommended</div>
+                <div style="font-size: 10.5px; color: var(--text-muted);">&lt;2ms zero-router latency</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Doctor Quick Advice Banner -->
+          <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(56, 182, 255, 0.05); border: 1px dashed rgba(56, 182, 255, 0.2); border-radius: 8px; padding: 8px 14px; font-size: 11.5px; color: var(--text-secondary);">
+            <div style="display: flex; align-items: center; gap: 6px;">
+              <strong style="color: var(--accent-solar);">Doctor Tip:</strong>
+              <span>Turn on <strong>Personal Hotspot</strong> on your phone for direct pairing without router AP isolation.</span>
+            </div>
+            <span style="color: var(--text-muted); font-size: 11px;">Or plug in USB-C cable for instant offline link</span>
+          </div>
+        </div>
       </div>
     `;
   }
@@ -3910,9 +5356,32 @@ function renderDashboard() {
                   <span style="color: var(--text-muted);">&bull;</span>
                   <span style="color: var(--emerald-ion); font-weight: 500;">Connected</span>
                 </div>
-                <div id="phone-bluetooth-badge" style="margin-top: 6px; display: inline-flex; align-items: center; gap: 5px; font-size: 11px; padding: 2.5px 8px; border-radius: 6px; background: ${device.bluetoothConnected ? 'rgba(52, 211, 153, 0.12)' : 'rgba(56, 189, 248, 0.1)'}; border: 1px solid ${device.bluetoothConnected ? 'rgba(52, 211, 153, 0.28)' : 'rgba(56, 189, 248, 0.2)'}; color: ${device.bluetoothConnected ? '#34d399' : '#38bdf8'}; font-weight: 500; cursor: pointer; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="Phone Bluetooth Status (Click to open Bluetooth settings)">
-                  ${device.bluetoothConnected ? Icons.BluetoothConnected(12, '#34d399') : Icons.Bluetooth(12, '#38bdf8')}
-                  <span style="overflow: hidden; text-overflow: ellipsis;">${device.bluetoothStatus || 'Bluetooth On'}</span>
+                <div style="margin-top: 8px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+                  <!-- Phone Bluetooth Badge -->
+                  <div id="phone-bluetooth-badge" style="display: inline-flex; align-items: center; gap: 5px; font-size: 11px; padding: 2.5px 8px; border-radius: 6px; background: ${phoneBluetoothState.enabled ? 'rgba(52, 211, 153, 0.12)' : 'rgba(255, 255, 255, 0.05)'}; border: 1px solid ${phoneBluetoothState.enabled ? 'rgba(52, 211, 153, 0.28)' : 'var(--border-subtle)'}; color: ${phoneBluetoothState.enabled ? '#34d399' : '#94a3b8'}; font-weight: 500; cursor: pointer; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="Phone Bluetooth (Click to manage accessories in-app)">
+                    ${phoneBluetoothState.enabled ? Icons.BluetoothConnected(12, '#34d399') : Icons.Bluetooth(12, '#94a3b8')}
+                    <span style="overflow: hidden; text-overflow: ellipsis;">${phoneBluetoothState.connected_device || (phoneBluetoothState.enabled ? 'BT On' : 'BT Off')}</span>
+                  </div>
+
+                  <!-- Phone Wi-Fi Badge -->
+                  <div id="phone-wifi-badge" style="display: inline-flex; align-items: center; gap: 5px; font-size: 11px; padding: 2.5px 8px; border-radius: 6px; background: ${phoneWifiState.enabled ? 'rgba(56, 189, 248, 0.12)' : 'rgba(255, 255, 255, 0.05)'}; border: 1px solid ${phoneWifiState.enabled ? 'rgba(56, 189, 248, 0.28)' : 'var(--border-subtle)'}; color: ${phoneWifiState.enabled ? '#38bdf8' : '#94a3b8'}; font-weight: 500; cursor: pointer; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="Phone Wi-Fi (Click to view Wi-Fi & Hotspot)">
+                    ${Icons.Wifi(12, phoneWifiState.enabled ? '#38bdf8' : '#94a3b8')}
+                    <span style="overflow: hidden; text-overflow: ellipsis;">${phoneWifiState.ssid || (phoneWifiState.enabled ? 'Wi-Fi On' : 'Wi-Fi Off')}</span>
+                  </div>
+
+                  <!-- Phone Location GPS Badge (1-click toggle) -->
+                  <div id="phone-location-badge" style="display: inline-flex; align-items: center; gap: 5px; font-size: 11px; padding: 2.5px 8px; border-radius: 6px; background: ${phoneLocationEnabled ? 'rgba(74, 227, 139, 0.12)' : 'rgba(255, 255, 255, 0.05)'}; border: 1px solid ${phoneLocationEnabled ? 'rgba(74, 227, 139, 0.28)' : 'var(--border-subtle)'}; color: ${phoneLocationEnabled ? '#4ae38b' : '#94a3b8'}; font-weight: 500; cursor: pointer;" title="Phone Location (Click to toggle GPS)">
+                    ${Icons.Navigation(12, phoneLocationEnabled ? '#4ae38b' : '#94a3b8')}
+                    <span>${phoneLocationEnabled ? 'Phone GPS On' : 'Phone GPS Off'}</span>
+                  </div>
+
+                  <!-- Phone Hotspot Badge -->
+                  ${phoneHotspotState.enabled ? `
+                    <div id="phone-hotspot-badge" style="display: inline-flex; align-items: center; gap: 5px; font-size: 11px; padding: 2.5px 8px; border-radius: 6px; background: rgba(56, 182, 255, 0.15); border: 1px solid rgba(56, 182, 255, 0.35); color: #38b6ff; font-weight: 500; cursor: pointer;" title="Personal Hotspot Active">
+                      ${Icons.Radio(12, '#38b6ff')}
+                      <span>Hotspot</span>
+                    </div>
+                  ` : ''}
                 </div>
               </div>
             </div>
@@ -3969,10 +5438,16 @@ function renderDashboard() {
                   <span style="color: var(--text-muted);">&bull;</span>
                   <span style="color: var(--cyan-neon); font-weight: 500;">This Mac</span>
                 </div>
-                <button id="btn-mac-bluetooth-badge" style="margin-top: 6px; display: inline-flex; align-items: center; gap: 5px; font-size: 11px; padding: 2.5px 8px; border-radius: 6px; background: ${hostTelemetry.bluetooth_connected ? 'rgba(52, 211, 153, 0.12)' : 'rgba(56, 189, 248, 0.1)'}; border: 1px solid ${hostTelemetry.bluetooth_connected ? 'rgba(52, 211, 153, 0.28)' : 'rgba(56, 189, 248, 0.2)'}; color: ${hostTelemetry.bluetooth_connected ? '#34d399' : '#38bdf8'}; font-weight: 500; cursor: pointer; text-align: left; max-width: 100%; transition: all 0.2s;" title="Click to open Mac Bluetooth settings">
-                  ${hostTelemetry.bluetooth_connected ? Icons.BluetoothConnected(12, '#34d399') : Icons.Bluetooth(12, '#38bdf8')}
-                  <span style="overflow: hidden; text-overflow: ellipsis;">${hostTelemetry.bluetooth_status || 'Bluetooth On'}</span>
-                </button>
+                <div style="margin-top: 6px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+                  <button id="btn-mac-bluetooth-badge" style="display: inline-flex; align-items: center; gap: 5px; font-size: 11px; padding: 2.5px 8px; border-radius: 6px; background: ${hostTelemetry.bluetooth_connected ? 'rgba(52, 211, 153, 0.12)' : 'rgba(56, 189, 248, 0.1)'}; border: 1px solid ${hostTelemetry.bluetooth_connected ? 'rgba(52, 211, 153, 0.28)' : 'rgba(56, 189, 248, 0.2)'}; color: ${hostTelemetry.bluetooth_connected ? '#34d399' : '#38bdf8'}; font-weight: 500; cursor: pointer; text-align: left; max-width: 100%; transition: all 0.2s;" title="Click to open Mac Bluetooth settings">
+                    ${hostTelemetry.bluetooth_connected ? Icons.BluetoothConnected(12, '#34d399') : Icons.Bluetooth(12, '#38bdf8')}
+                    <span style="overflow: hidden; text-overflow: ellipsis;">${hostTelemetry.bluetooth_status || 'Bluetooth On'}</span>
+                  </button>
+                  <button id="btn-mac-location-badge" style="display: inline-flex; align-items: center; gap: 5px; font-size: 11px; padding: 2.5px 8px; border-radius: 6px; background: ${macLocationEnabled ? 'rgba(56, 189, 248, 0.12)' : 'rgba(255, 255, 255, 0.05)'}; border: 1px solid ${macLocationEnabled ? 'rgba(56, 189, 248, 0.28)' : 'var(--border-subtle)'}; color: ${macLocationEnabled ? '#38bdf8' : '#94a3b8'}; font-weight: 500; cursor: pointer; text-align: left; max-width: 100%; transition: all 0.2s;" title="Mac Location Services (Click to toggle via Touch ID/Password)">
+                    ${Icons.Navigation(12, macLocationEnabled ? '#38bdf8' : '#94a3b8')}
+                    <span style="overflow: hidden; text-overflow: ellipsis;">${macLocationEnabled ? 'Mac Location On' : 'Mac Location Off'}</span>
+                  </button>
+                </div>
               </div>
             </div>
             ${renderMacBatteryWidget(hostTelemetry.battery, hostTelemetry.is_charging)}
@@ -4291,7 +5766,7 @@ function renderMirrorStudio() {
 
     ${
       mirrorStatusMsg
-        ? `<div style="background: rgba(255,110,50,0.08); border: 1px solid var(--border-active); border-radius: var(--radius-sm); padding: 12px 16px; font-size: 12.5px; color: var(--accent-solar);">
+        ? `<div style="background: rgba(56,182,255,0.08); border: 1px solid var(--border-active); border-radius: var(--radius-sm); padding: 12px 16px; font-size: 12.5px; color: var(--accent-solar);">
             ${mirrorStatusMsg}
           </div>`
         : ''
@@ -4299,273 +5774,226 @@ function renderMirrorStudio() {
   `;
 }
 
-// MARK: - Telephony & Calls Studio (Redesigned with Spacious Contacts & Full Call History)
+// MARK: - Telephony & Calls Studio (Favorites Circles, Full-Width Recents, Floating Dock)
 function renderCallsView() {
   const isConnected = device.status === 'Connected';
 
-  if (!isConnected) {
-    return `
-      <div class="workspace-header">
-        <div class="workspace-title-box">
-          <h1>Calls & Audio</h1>
-          <p>Dial phone numbers, attend incoming calls, and manage contacts</p>
-        </div>
-      </div>
-
-      <div class="glass-card" style="padding: 44px 32px; text-align: center; display: flex; flex-direction: column; align-items: center; gap: 16px; margin-top: 14px;">
-        <div style="width: 64px; height: 64px; border-radius: 20px; background: rgba(255, 255, 255, 0.04); border: 1px solid var(--border-subtle); display: flex; align-items: center; justify-content: center; color: var(--text-muted);">
-          ${Icons.Calls(30, 'currentColor')}
-        </div>
-        <div>
-          <h2 style="font-size: 19px; font-weight: 700; color: #fff;">Connect Phone to Access Calls</h2>
-          <p style="font-size: 13px; color: var(--text-secondary); max-width: 440px; margin-top: 6px; line-height: 1.5;">
-            Connect your phone over Wi-Fi to dial numbers, receive incoming calls, and route audio directly through your Mac.
-          </p>
-        </div>
-        <button class="btn-solar" id="btn-refresh-telemetry" style="margin-top: 8px;">
-          ${Icons.Refresh(13, '#fff')}
-          <span>Scan Wireless Devices</span>
-        </button>
-      </div>
-    `;
-  }
-
-  // Filter call history
+  const cleanSearch = callHistorySearchQuery.trim().toLowerCase();
   const filteredCalls = callHistory.filter((c) => {
-    if (callsTabFilter === 'missed') return c.type === 'missed' || c.duration === 'Missed';
-    if (callsTabFilter === 'outgoing') return c.type === 'outgoing' || c.call_type === 'outgoing';
-    if (callsTabFilter === 'incoming') return c.type === 'incoming' || (!c.type && c.call_type !== 'outgoing');
+    // Filter tab
+    if (callsTabFilter === 'missed' && !(c.type === 'missed' || c.duration === 'Missed' || c.call_type === 'missed')) return false;
+    if (callsTabFilter === 'outgoing' && !(c.type === 'outgoing' || c.call_type === 'outgoing')) return false;
+    if (callsTabFilter === 'incoming' && !(c.type === 'incoming' || (!c.type && c.call_type !== 'outgoing' && c.call_type !== 'missed'))) return false;
+
+    // Search query
+    if (cleanSearch) {
+      const nameMatch = (c.name || '').toLowerCase().includes(cleanSearch);
+      const numMatch = (c.number || '').replace(/[^0-9]/g, '').includes(cleanSearch.replace(/[^0-9]/g, '')) || (c.number || '').toLowerCase().includes(cleanSearch);
+      return nameMatch || numMatch;
+    }
     return true;
   });
+
+  const missedCount = callHistory.filter((c) => c.type === 'missed' || c.duration === 'Missed' || c.call_type === 'missed').length;
+  const outCount = callHistory.filter((c) => c.type === 'outgoing' || c.call_type === 'outgoing').length;
+  const inCount = callHistory.filter((c) => c.type === 'incoming' || (!c.type && c.call_type !== 'outgoing' && c.call_type !== 'missed')).length;
 
   return `
     <div class="workspace-header">
       <div class="workspace-title-box">
-        <h1>Calls & Audio</h1>
-        <p>Speed dial saved contacts, view complete call logs, and place calls with Mac keyboard</p>
-      </div>
-      <div style="display: flex; gap: 8px;">
-        <button class="btn-luxury" id="btn-simulate-incoming-call" title="Test receiving an incoming call on your Mac" style="font-size: 11.5px; padding: 6px 12px; display: flex; align-items: center; gap: 6px;">
-          📞 Test Incoming Call
-        </button>
+        <h1>Calls</h1>
+        <p>Favorites, recent call history, and dialer</p>
       </div>
     </div>
 
-    <div class="calls-workspace-layout" style="margin-top: 14px;">
-      <!-- Left Column: Spacious Contacts & Full Call History -->
-      <div class="calls-main-stream">
-        
-        <!-- Saved Contacts / Speed Dial (Spacious & Polished) -->
-        <div class="glass-card" style="padding: 18px 20px;">
-          <div class="card-title-row" style="margin-bottom: 14px;">
-            <span class="card-title" style="font-size: 14px;">
-              ${Icons.Users(16, 'var(--accent-solar)')}
-              <span>Contacts & Speed Dial</span>
-              <span class="badge" style="font-size: 10px; background: rgba(255,255,255,0.06); color: var(--text-secondary); padding: 2px 7px; border-radius: 10px;">
-                ${favouriteContacts.length}
-              </span>
+    ${!isConnected ? `
+      <div style="background: rgba(56, 182, 255, 0.08); border: 1px solid rgba(56, 182, 255, 0.25); border-radius: 12px; padding: 10px 16px; margin-top: 14px; display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+        <div style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #38b6ff;">
+          <span>⚠️</span>
+          <span>Phone is currently offline or reconnecting. Call logs and saved contacts remain fully browsable.</span>
+        </div>
+        <button class="btn-solar" id="btn-refresh-telemetry" style="padding: 4px 12px; font-size: 11px;">
+          ${Icons.Refresh(12, '#fff')}
+          <span>Reconnect</span>
+        </button>
+      </div>
+    ` : ''}
+
+    <div class="calls-full-canvas" style="margin-top: 16px;">
+      <!-- Top Row: Favourites in Circles with Computed Avatars -->
+      <div class="favourites-section">
+        <div class="favourites-header">
+          <div class="favourites-header-title">
+            ${Icons.Users(14, 'var(--accent-solar)')}
+            <span>Favorites</span>
+            <span class="badge" style="font-size: 9.5px; background: rgba(255,255,255,0.06); color: var(--text-secondary); padding: 1.5px 6px; border-radius: 8px;">
+              ${favouriteContacts.length}
             </span>
-            <button class="btn-luxury" id="btn-open-add-fav" style="padding: 5px 12px; font-size: 11.5px; display: flex; align-items: center; gap: 5px;">
-              <span>+</span> <span>Add Contact</span>
-            </button>
+          </div>
+          <button class="btn-luxury" id="btn-open-add-fav" style="padding: 4px 10px; font-size: 11px; display: flex; align-items: center; gap: 4px;">
+            <span>+</span> <span>Add Favorite</span>
+          </button>
+        </div>
+
+        <div class="fav-circles-track">
+          ${favouriteContacts.length === 0 ? `
+            <div style="padding: 16px 20px; background: rgba(255,255,255,0.02); border: 1px dashed var(--border-subtle); border-radius: 14px; display: flex; align-items: center; gap: 14px;">
+              <span style="font-size: 12px; color: var(--text-secondary);">No favorites saved yet. Add your frequently called contacts for one-click calling.</span>
+              <button class="btn-solar" id="btn-empty-add-fav" style="padding: 4px 10px; font-size: 11px; flex-shrink: 0;">+ Add Favorite</button>
+            </div>
+          ` : `
+            ${favouriteContacts.map(c => `
+              <div class="fav-circle-item btn-quick-dial" data-number="${c.number}" title="Call ${c.name} (${c.number})">
+                <button class="fav-circle-delete-badge btn-delete-fav" data-fav-id="${c.id}" title="Remove from favorites">✕</button>
+                <div class="fav-circle-avatar" style="background: ${getContactAvatarGradient(c.name, c.avatarColor)};">
+                  <span class="fav-circle-initial">${getContactInitials(c.name)}</span>
+                  <div class="fav-circle-hover-badge">
+                    ${Icons.Calls(18, '#ffffff')}
+                  </div>
+                </div>
+                <span class="fav-circle-name" title="${c.name}">${formatShortName(c.name)}</span>
+              </div>
+            `).join('')}
+
+            <!-- Add Button Circle -->
+            <div class="fav-circle-item" id="btn-open-add-fav-circle" title="Add Favorite Contact">
+              <div class="fav-circle-avatar add-circle">
+                <span style="font-size: 22px; font-weight: 300; color: var(--accent-solar); line-height: 1;">+</span>
+              </div>
+              <span class="fav-circle-name" style="color: var(--accent-solar); font-weight: 600;">Add</span>
+            </div>
+          `}
+        </div>
+      </div>
+
+      <!-- Full-Width Recent Call History Card -->
+      <div class="calls-history-card">
+        <div class="calls-history-header">
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <div style="width: 32px; height: 32px; border-radius: 9px; background: rgba(16, 185, 129, 0.15); color: var(--emerald-ion); display: flex; align-items: center; justify-content: center;">
+              ${Icons.Calls(16, 'currentColor')}
+            </div>
+            <div>
+              <span style="font-size: 14.5px; font-weight: 700; color: #fff;">Recent Calls</span>
+              <span class="badge" style="font-size: 10px; background: rgba(255,255,255,0.06); color: var(--text-secondary); padding: 2px 7px; border-radius: 10px; margin-left: 6px;">
+                ${filteredCalls.length}
+              </span>
+            </div>
           </div>
 
-          ${
-            favouriteContacts.length === 0
-              ? `
-            <div style="padding: 24px; text-align: center; color: var(--text-muted); background: rgba(255,255,255,0.015); border: 1px dashed var(--border-subtle); border-radius: 12px;">
-              <div style="font-size: 13px; color: #fff; font-weight: 600;">No contacts saved yet</div>
-              <p style="font-size: 12px; color: var(--text-secondary); max-width: 360px; margin: 4px auto 12px auto;">
-                Save your important contacts here for one-click speed dialing directly from your Mac.
-              </p>
-              <button class="btn-solar" id="btn-empty-add-fav" style="padding: 6px 14px; font-size: 11.5px;">
-                + Add First Contact
+          <!-- Real-time Search Box -->
+          <div class="calls-search-box">
+            <span class="calls-search-icon">🔍</span>
+            <input 
+              type="text" 
+              id="input-search-call-history" 
+              placeholder="Search by caller or number..." 
+              value="${callHistorySearchQuery}"
+              autocomplete="off"
+            />
+          </div>
+
+          <!-- Filter Pills & Sync Action -->
+          <div style="display: flex; gap: 4px; align-items: center; flex-wrap: wrap;">
+            <button class="btn-luxury btn-call-filter ${callsTabFilter === 'all' ? 'active' : ''}" data-filter="all" style="padding: 4px 10px; font-size: 11px; ${callsTabFilter === 'all' ? 'border-color: var(--accent-solar); color: var(--accent-solar);' : ''}">
+              All (${callHistory.length})
+            </button>
+            <button class="btn-luxury btn-call-filter ${callsTabFilter === 'missed' ? 'active' : ''}" data-filter="missed" style="padding: 4px 10px; font-size: 11px; ${callsTabFilter === 'missed' ? 'border-color: #ef4444; color: #ef4444;' : ''}">
+              Missed (${missedCount})
+            </button>
+            <button class="btn-luxury btn-call-filter ${callsTabFilter === 'outgoing' ? 'active' : ''}" data-filter="outgoing" style="padding: 4px 10px; font-size: 11px; ${callsTabFilter === 'outgoing' ? 'border-color: #3b82f6; color: #3b82f6;' : ''}">
+              Outgoing (${outCount})
+            </button>
+            <button class="btn-luxury btn-call-filter ${callsTabFilter === 'incoming' ? 'active' : ''}" data-filter="incoming" style="padding: 4px 10px; font-size: 11px; ${callsTabFilter === 'incoming' ? 'border-color: var(--emerald-ion); color: var(--emerald-ion);' : ''}">
+              Incoming (${inCount})
+            </button>
+
+            <button class="btn-luxury" id="btn-sync-phone-history-now" style="padding: 4px 10px; font-size: 11px; margin-left: 4px; display: flex; align-items: center; gap: 5px;" title="Sync latest 50-100 call records from phone">
+              ${Icons.Refresh(11, 'currentColor')}
+              <span>Sync</span>
+            </button>
+
+            ${callHistory.length > 0 ? `
+              <button class="btn-luxury" id="btn-clear-call-history" style="padding: 4px 9px; font-size: 11px; color: #ef4444; border-color: rgba(239, 68, 68, 0.25); margin-left: 4px; display: flex; align-items: center; gap: 4px;" title="Clear call history">
+                <span>Clear All</span>
               </button>
-            </div>
-          `
-              : `
-            <div class="contacts-spacious-grid">
-              ${favouriteContacts
-                .map(
-                  (c) => `
-                <div class="contact-card-premium">
-                  <div class="contact-card-avatar" style="background: ${c.avatarColor || '#3b82f6'};">
-                    ${c.name.substring(0, 1).toUpperCase()}
+            ` : ''}
+          </div>
+        </div>
+
+        ${filteredCalls.length === 0 ? `
+          <div style="padding: 48px 20px; text-align: center; color: var(--text-secondary); font-size: 13px;">
+            ${callHistorySearchQuery ? `No call records matching "${callHistorySearchQuery}".` : 'No call records found. Placed and received calls will automatically sync here.'}
+          </div>
+        ` : `
+          <div class="call-history-container" style="max-height: 520px; overflow-y: auto; padding-right: 4px;">
+            ${filteredCalls.map((call) => {
+              const isMissed = call.type === 'missed' || call.duration === 'Missed' || call.call_type === 'missed';
+              const isOut = call.type === 'outgoing' || call.call_type === 'outgoing';
+              const typeLabel = isMissed ? 'Missed' : isOut ? 'Outgoing' : 'Incoming';
+              const typeColor = isMissed ? '#ef4444' : isOut ? '#3b82f6' : 'var(--emerald-ion)';
+              const iconBg = isMissed
+                ? 'rgba(239, 68, 68, 0.15)'
+                : isOut
+                ? 'rgba(59, 130, 246, 0.15)'
+                : 'rgba(16, 185, 129, 0.15)';
+
+              const isSaved = favouriteContacts.some(
+                (c) => c.number.replace(/[\s-]/g, '') === call.number.replace(/[\s-]/g, '')
+              );
+
+              return `
+                <div class="call-history-row" style="display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-radius: 12px; transition: background 0.15s; border-bottom: 1px solid rgba(255,255,255,0.03);">
+                  <div style="display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1;">
+                    <div style="width: 36px; height: 36px; border-radius: 50%; background: ${iconBg}; display: flex; align-items: center; justify-content: center; color: ${typeColor}; flex-shrink: 0;">
+                      ${Icons.Calls(15, 'currentColor')}
+                    </div>
+                    <div style="display: flex; flex-direction: column; min-width: 0;">
+                      <div style="display: flex; align-items: center; gap: 8px;">
+                        <span style="font-size: 13.5px; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+                          ${call.name || call.number}
+                        </span>
+                        <span style="font-size: 10px; font-weight: 600; color: ${typeColor}; background: ${iconBg}; padding: 1px 6px; border-radius: 4px;">
+                          ${typeLabel}
+                        </span>
+                      </div>
+                      <div style="font-size: 11.5px; color: var(--text-secondary); margin-top: 1px;">
+                        ${call.number} • ${call.time} ${call.duration && call.duration !== 'Missed' ? `• <span style="color: var(--text-muted);">${call.duration}</span>` : ''}
+                      </div>
+                    </div>
                   </div>
-                  <div class="contact-card-info">
-                    <span class="contact-card-name" title="${c.name}">${c.name}</span>
-                    <span class="contact-card-number" title="${c.number}">${c.number}</span>
-                  </div>
-                  <div class="contact-card-actions">
-                    <button class="btn-contact-call btn-quick-dial" data-number="${c.number}" title="Call ${c.name}">
-                      📞
+
+                  <div style="display: flex; align-items: center; gap: 8px; flex-shrink: 0;">
+                    ${!isSaved ? `
+                      <button class="btn-luxury btn-add-history-contact" data-number="${call.number}" data-name="${call.name || call.number}" title="Save to Favorites" style="padding: 5px 9px; font-size: 11px;">
+                        + Fav
+                      </button>
+                    ` : ''}
+                    <button class="btn-solar btn-quick-dial" data-number="${call.number}" title="Call ${call.number}" style="padding: 5px 14px; font-size: 11.5px; font-weight: 600; display: flex; align-items: center; gap: 5px;">
+                      ${Icons.Calls(12, '#fff')}
+                      <span>Call</span>
                     </button>
-                    <button class="btn-contact-delete btn-delete-fav" data-fav-id="${c.id}" title="Delete contact">
+                    <button class="btn-luxury btn-delete-call-history" data-call-id="${call.id}" data-phone-id="${call.phone_id || ''}" data-number="${call.number}" title="Delete call record" style="padding: 5px 8px; font-size: 11px; color: #ef4444; border-color: rgba(239, 68, 68, 0.25);">
                       ✕
                     </button>
                   </div>
                 </div>
-              `
-                )
-                .join('')}
-            </div>
-          `
-          }
-        </div>
-
-        <!-- Full Call History (Expanded & Comfortable) -->
-        <div class="glass-card" style="padding: 18px 20px;">
-          <div class="card-title-row" style="margin-bottom: 14px;">
-            <span class="card-title" style="font-size: 14px;">
-              ${Icons.Calls(16, 'var(--emerald-ion)')}
-              <span>Call History</span>
-              <span class="badge" style="font-size: 10px; background: rgba(255,255,255,0.06); color: var(--text-secondary); padding: 2px 7px; border-radius: 10px;">
-                ${filteredCalls.length}
-              </span>
-            </span>
-            <div style="display: flex; gap: 4px;">
-              <button class="btn-luxury btn-call-filter ${callsTabFilter === 'all' ? 'active' : ''}" data-filter="all" style="padding: 4px 10px; font-size: 11px; ${callsTabFilter === 'all' ? 'border-color: var(--accent-solar); color: var(--accent-solar);' : ''}">
-                All (${callHistory.length})
-              </button>
-              <button class="btn-luxury btn-call-filter ${callsTabFilter === 'outgoing' ? 'active' : ''}" data-filter="outgoing" style="padding: 4px 10px; font-size: 11px; ${callsTabFilter === 'outgoing' ? 'border-color: var(--accent-solar); color: var(--accent-solar);' : ''}">
-                Outgoing
-              </button>
-              <button class="btn-luxury btn-call-filter ${callsTabFilter === 'missed' ? 'active' : ''}" data-filter="missed" style="padding: 4px 10px; font-size: 11px; ${callsTabFilter === 'missed' ? 'border-color: var(--accent-solar); color: var(--accent-solar);' : ''}">
-                Missed
-              </button>
-              <button class="btn-luxury btn-call-filter ${callsTabFilter === 'incoming' ? 'active' : ''}" data-filter="incoming" style="padding: 4px 10px; font-size: 11px; ${callsTabFilter === 'incoming' ? 'border-color: var(--accent-solar); color: var(--accent-solar);' : ''}">
-                Incoming
-              </button>
-            </div>
+              `;
+            }).join('')}
           </div>
-
-          ${
-            filteredCalls.length === 0
-              ? `
-            <div style="padding: 36px 20px; text-align: center; color: var(--text-secondary); font-size: 13px;">
-              No call records found for this filter. Placed and received calls will automatically be saved and displayed here.
-            </div>
-          `
-              : `
-            <div class="call-history-container" style="max-height: 460px; overflow-y: auto; padding-right: 2px;">
-              ${filteredCalls
-                .map((call) => {
-                  const isMissed = call.type === 'missed' || call.duration === 'Missed';
-                  const isOut = call.type === 'outgoing' || call.call_type === 'outgoing';
-                  const typeLabel = isMissed ? 'Missed' : isOut ? 'Outgoing' : 'Incoming';
-                  const typeColor = isMissed ? '#ef4444' : isOut ? '#3b82f6' : 'var(--emerald-ion)';
-                  const iconBg = isMissed
-                    ? 'rgba(239, 68, 68, 0.15)'
-                    : isOut
-                    ? 'rgba(59, 130, 246, 0.15)'
-                    : 'rgba(16, 185, 129, 0.15)';
-
-                  // Check if already in contacts
-                  const isSaved = favouriteContacts.some(
-                    (c) => c.number.replace(/[\s-]/g, '') === call.number.replace(/[\s-]/g, '')
-                  );
-
-                  return `
-                    <div class="call-history-row">
-                      <div style="display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1;">
-                        <div style="width: 36px; height: 36px; border-radius: 50%; background: ${iconBg}; display: flex; align-items: center; justify-content: center; color: ${typeColor}; flex-shrink: 0;">
-                          ${Icons.Calls(15, 'currentColor')}
-                        </div>
-                        <div style="display: flex; flex-direction: column; min-width: 0;">
-                          <div style="display: flex; align-items: center; gap: 8px;">
-                            <span style="font-size: 13.5px; font-weight: 700; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
-                              ${call.name || call.number}
-                            </span>
-                            <span style="font-size: 10px; font-weight: 600; color: ${typeColor}; background: ${iconBg}; padding: 1px 6px; border-radius: 4px;">
-                              ${typeLabel}
-                            </span>
-                          </div>
-                          <div style="font-size: 11.5px; color: var(--text-secondary); margin-top: 1px;">
-                            ${call.number} • ${call.time} ${call.duration && call.duration !== 'Missed' ? `• <span style="color: var(--text-muted);">${call.duration}</span>` : ''}
-                          </div>
-                        </div>
-                      </div>
-
-                      <div style="display: flex; align-items: center; gap: 8px; flex-shrink: 0;">
-                        ${
-                          !isSaved
-                            ? `
-                          <button class="btn-luxury btn-add-history-contact" data-number="${call.number}" data-name="${call.name || call.number}" title="Save to Contacts" style="padding: 5px 9px; font-size: 11px;">
-                            + Save
-                          </button>
-                        `
-                            : ''
-                        }
-                        <button class="btn-solar btn-quick-dial" data-number="${call.number}" title="Call ${call.number}" style="padding: 5px 14px; font-size: 11.5px; font-weight: 600;">
-                          Call
-                        </button>
-                      </div>
-                    </div>
-                  `;
-                })
-                .join('')}
-            </div>
-          `
-          }
-        </div>
+        `}
       </div>
 
-      <!-- Right Column: Tactile Keypad Dialer -->
-      <div class="calls-sidebar-dialer">
-        <div class="dialer-compact-card">
-          <div class="card-title-row" style="margin-bottom: 2px;">
-            <span class="card-title" style="font-size: 13.5px;">
-              ${Icons.Calls(15, 'var(--accent-solar)')}
-              <span>Tactile Keypad</span>
-            </span>
-            <span class="badge" style="font-size: 9.5px; background: rgba(255,255,255,0.06); color: var(--text-secondary); border: 1px solid var(--border-subtle); padding: 2px 6px;">
-              Keyboard Enabled ⌨️
-            </span>
-          </div>
-
-          <div class="dialer-container" style="max-width: 100%;">
-            <div class="dialer-display">
-              <input 
-                type="text" 
-                class="dialer-input-number" 
-                id="input-dialer-number" 
-                placeholder="Type or dial number..." 
-                value="${dialerInputNumber}"
-                autocomplete="off"
-                spellcheck="false"
-              />
-              <div style="display: flex; gap: 4px; align-items: center;">
-                <button class="btn-luxury" id="btn-dialer-clear" title="Clear all" style="padding: 4px 7px; font-size: 10px; color: var(--text-muted);">✕</button>
-                <button class="btn-luxury" id="btn-dialer-backspace" title="Backspace (⌫)" style="padding: 4px 8px; font-size: 11px;">⌫</button>
-              </div>
-            </div>
-
-            <div style="font-size: 10px; color: var(--text-muted); text-align: center; margin-top: -4px;">
-              Press <kbd style="background: rgba(255,255,255,0.1); padding: 1px 4px; border-radius: 3px; font-size: 9.5px;">Enter</kbd> to call, <kbd style="background: rgba(255,255,255,0.1); padding: 1px 4px; border-radius: 3px; font-size: 9.5px;">Esc</kbd> to clear
-            </div>
-
-            <div class="keypad-grid" style="gap: 8px;">
-              ${renderKeypadBtn('1', '')}
-              ${renderKeypadBtn('2', 'ABC')}
-              ${renderKeypadBtn('3', 'DEF')}
-              ${renderKeypadBtn('4', 'GHI')}
-              ${renderKeypadBtn('5', 'JKL')}
-              ${renderKeypadBtn('6', 'MNO')}
-              ${renderKeypadBtn('7', 'PQRS')}
-              ${renderKeypadBtn('8', 'TUV')}
-              ${renderKeypadBtn('9', 'WXYZ')}
-              ${renderKeypadBtn('*', '')}
-              ${renderKeypadBtn('0', '+')}
-              ${renderKeypadBtn('#', '')}
-            </div>
-
-            <div class="call-actions-row" style="margin-top: 4px;">
-              <button class="btn-call-start" id="btn-trigger-call" title="Place Call (Enter)">
-                ${Icons.Calls(22, '#fff')}
-              </button>
-            </div>
-          </div>
-        </div>
+      <!-- Floating Action Dock (Bottom Right) -->
+      <div class="calls-floating-actions-dock">
+        <button class="btn-floating-dock-pill" id="btn-open-contacts-sheet" title="Open Full Contacts Directory">
+          ${Icons.Users(15, 'currentColor')}
+          <span>Contacts</span>
+        </button>
+        <button class="btn-floating-dock-pill primary" id="btn-open-keypad-sheet" title="Open Tactile Keypad Dialpad">
+          ${Icons.Keypad(16, '#fff')}
+          <span>Dialpad</span>
+        </button>
       </div>
     </div>
   `;
@@ -4573,9 +6001,9 @@ function renderCallsView() {
 
 function renderKeypadBtn(digit: string, sub: string) {
   return `
-    <button class="keypad-btn btn-keypad-digit" data-digit="${digit}">
-      <span class="keypad-digit">${digit}</span>
-      ${sub ? `<span class="keypad-sub">${sub}</span>` : ''}
+    <button class="ios-keypad-circle btn-keypad-digit" data-digit="${digit}">
+      <span class="ios-keypad-digit">${digit}</span>
+      ${sub ? `<span class="ios-keypad-sub">${sub}</span>` : ''}
     </button>
   `;
 }
@@ -4648,7 +6076,7 @@ function renderNotificationsView() {
                 }
               }
               if (!iconHtml) {
-                iconHtml = `<div style="width: 22px; height: 22px; border-radius: 5px; background: rgba(255, 110, 50, 0.15); display: flex; align-items: center; justify-content: center; color: var(--accent-solar);">
+                iconHtml = `<div style="width: 22px; height: 22px; border-radius: 5px; background: rgba(56, 182, 255, 0.15); display: flex; align-items: center; justify-content: center; color: var(--accent-solar);">
                   ${Icons.Notifications(12, 'currentColor')}
                 </div>`;
               }
@@ -4727,103 +6155,249 @@ function renderClipboardView() {
     `;
   }
 
+  // Filter clips
+  const q = clipboardSearchQuery.toLowerCase().trim();
+  const filtered = clipboardHistory.filter((item) => {
+    const matchesSearch = !q || item.text.toLowerCase().includes(q);
+    const matchesFilter =
+      clipboardActiveFilter === 'pinned'
+        ? !!item.pinned
+        : clipboardActiveFilter === 'mac'
+        ? item.source.toLowerCase().includes('mac')
+        : clipboardActiveFilter === 'phone'
+        ? item.source.toLowerCase().includes('phone') || item.source.toLowerCase().includes('remote')
+        : true;
+    return matchesSearch && matchesFilter;
+  });
+
+  const pinnedClips = filtered.filter((i) => i.pinned);
+  const recentClips = filtered.filter((i) => !i.pinned);
+
+  const totalPinned = clipboardHistory.filter((i) => i.pinned).length;
+  const totalMac = clipboardHistory.filter((i) => i.source.toLowerCase().includes('mac')).length;
+  const totalPhone = clipboardHistory.filter((i) => i.source.toLowerCase().includes('phone') || i.source.toLowerCase().includes('remote')).length;
+
   return `
     <div class="workspace-header">
       <div class="workspace-title-box">
-        <h1>Clipboard</h1>
-        <p>Bi-directional clipboard synchronization between Mac and Android</p>
-      </div>
-      <div class="header-action-group">
-        <span class="badge" style="background: rgba(16, 185, 129, 0.15); color: var(--emerald-ion); display: inline-flex; align-items: center; gap: 6px; font-size: 11px; padding: 4px 10px; border-radius: 6px; font-weight: 600;">
-          ${Icons.ShieldCheck(13, 'var(--emerald-ion)')}
-          <span>Sync Engine Active • Zero Echo Loops</span>
-        </span>
-      </div>
-    </div>
-
-    <div class="dual-grid" style="margin-top: 14px;">
-      <div class="glass-card">
-        <div class="card-title">
-          ${Icons.Clipboard(15, 'var(--accent-solar)')}
-          <span>Send Text to Phone</span>
-        </div>
-        <p style="font-size: 12px; color: var(--text-secondary);">
-          Direct injection into phone active field or Android clipboard buffer.
-        </p>
-        <textarea 
-          id="textarea-push-phone" 
-          placeholder="Paste or type text..." 
-          style="width: 100%; height: 90px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); color: #fff; padding: 10px; font-size: 12.5px; resize: none; outline: none; margin-top: 4px;"
-        >${pushToPhoneInput}</textarea>
-        <button class="btn-solar" id="btn-push-to-phone" style="align-self: flex-start; margin-top: 4px;">
-          Send to Phone
-        </button>
-      </div>
-
-      <div class="glass-card">
-        <div class="card-title-row">
-          <span class="card-title">
-            ${Icons.Clipboard(15, 'var(--purple-neon)')}
-            <span>Current Phone Clipboard</span>
+        <div style="display: flex; align-items: center; gap: 10px;">
+          <h1 style="margin: 0;">Clipboard</h1>
+          <span class="badge" style="background: rgba(16, 185, 129, 0.15); color: var(--emerald-ion); display: inline-flex; align-items: center; gap: 5px; font-size: 11px; padding: 3px 9px; border-radius: 6px; font-weight: 600;">
+            <span style="width: 6px; height: 6px; border-radius: 50%; background: var(--emerald-ion);"></span>
+            <span>Live Sync</span>
           </span>
         </div>
-        <div style="background: rgba(255,255,255,0.02); border: 1px solid var(--border-subtle); border-radius: 10px; padding: 14px; font-size: 13px; color: #fff; min-height: 80px;">
-          ${latestClipboard || '<span style="color: var(--text-muted);">No text in phone clipboard</span>'}
-        </div>
-        <button class="btn-luxury" id="btn-copy-clipboard" style="align-self: flex-start;">
-          ${phoneToMacCopied ? `${Icons.Check(14, 'var(--emerald-ion)')} <span>Copied to Mac</span>` : 'Copy to Mac'}
+        <p style="margin-top: 4px;">Universal bi-directional clipboard stream</p>
+      </div>
+      <div class="header-action-group" style="display: flex; align-items: center; gap: 8px;">
+        ${
+          clipboardHistory.some((i) => !i.pinned)
+            ? `<button class="btn-luxury" id="btn-clear-clipboard-history" style="padding: 6px 12px; font-size: 11.5px; display: flex; align-items: center; gap: 6px;">
+                ${Icons.Trash(13, 'var(--text-muted)')}
+                <span>Clear History</span>
+              </button>`
+            : ''
+        }
+        <button class="btn-luxury" id="btn-refresh-clipboard" style="padding: 6px 12px; font-size: 11.5px; display: flex; align-items: center; gap: 6px;">
+          ${Icons.Refresh(13, 'var(--accent-solar)')}
+          <span>Sync</span>
         </button>
       </div>
     </div>
 
-    <!-- Universal Clipboard Stream -->
-    <div class="glass-card" style="margin-top: 14px;">
-      <div class="card-title-row" style="margin-bottom: 12px;">
-        <span class="card-title">
-          ${Icons.Layers(15, 'var(--accent-solar)')}
-          <span>Unified Sync History</span>
-        </span>
-        <span style="font-size: 11px; color: var(--text-muted);">
-          Preserved seamlessly during wired/wireless transitions
-        </span>
+    <!-- Quick Send Pill (Compact single-line) -->
+    <div class="glass-card" style="margin-top: 14px; padding: 10px 14px; display: flex; align-items: center; gap: 10px;">
+      <span style="color: var(--accent-solar); display: flex; align-items: center;">
+        ${Icons.Phone(16, 'var(--accent-solar)')}
+      </span>
+      <input 
+        type="text" 
+        id="input-push-phone" 
+        placeholder="Type or paste text to beam directly to phone..." 
+        value="${pushToPhoneInput}" 
+        style="flex: 1; background: transparent; border: none; color: #fff; font-size: 13px; outline: none;"
+      />
+      <button class="btn-solar" id="btn-push-to-phone" style="padding: 6px 14px; font-size: 12px; font-weight: 600; border-radius: 8px;">
+        Send to Phone
+      </button>
+    </div>
+
+    <!-- Active Phone Clipboard banner (if text exists) -->
+    ${
+      latestClipboard
+        ? `
+      <div style="margin-top: 10px; background: rgba(192, 132, 252, 0.08); border: 1px solid rgba(192, 132, 252, 0.25); border-radius: 10px; padding: 8px 14px; display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+        <div style="display: flex; align-items: center; gap: 8px; overflow: hidden;">
+          <span style="font-size: 10px; font-weight: 700; color: var(--purple-neon); background: rgba(192, 132, 252, 0.15); padding: 2px 6px; border-radius: 4px;">PHONE ACTIVE</span>
+          <span style="font-size: 12px; color: #fff; font-family: monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+            ${latestClipboard}
+          </span>
+        </div>
+        <button class="btn-luxury" id="btn-copy-clipboard" style="padding: 4px 10px; font-size: 11px; flex-shrink: 0;">
+          ${phoneToMacCopied ? `${Icons.Check(13, 'var(--emerald-ion)')} Copied` : 'Copy to Mac'}
+        </button>
+      </div>`
+        : ''
+    }
+
+    <!-- Search & Filter Bar -->
+    <div style="margin-top: 14px; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
+      <div style="flex: 1; min-width: 200px; display: flex; align-items: center; gap: 8px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-subtle); border-radius: 10px; padding: 6px 12px;">
+        ${Icons.Search(14, 'var(--text-muted)')}
+        <input 
+          type="text" 
+          id="clipboard-search-input" 
+          placeholder="Search clips..." 
+          value="${clipboardSearchQuery}" 
+          style="flex: 1; background: transparent; border: none; color: #fff; font-size: 12.5px; outline: none;"
+        />
+        ${
+          clipboardSearchQuery
+            ? `<button id="btn-clear-search" style="background: none; border: none; color: var(--text-muted); cursor: pointer; padding: 0 4px;">✕</button>`
+            : ''
+        }
       </div>
 
+      <!-- Filter Tabs -->
+      <div style="display: flex; align-items: center; gap: 6px;">
+        ${[
+          { key: 'all', label: `All (${clipboardHistory.length})` },
+          { key: 'pinned', label: `📌 Pinned (${totalPinned})` },
+          { key: 'mac', label: `💻 Mac (${totalMac})` },
+          { key: 'phone', label: `📱 Phone (${totalPhone})` },
+        ]
+          .map(
+            (tab) => `
+          <button 
+            class="clipboard-filter-tab ${clipboardActiveFilter === tab.key ? 'active' : ''}" 
+            data-filter="${tab.key}" 
+            style="padding: 5px 11px; font-size: 11.5px; font-weight: ${
+              clipboardActiveFilter === tab.key ? '600' : '500'
+            }; border-radius: 8px; cursor: pointer; transition: all 0.15s ease; border: 1px solid ${
+              clipboardActiveFilter === tab.key ? 'var(--accent-solar)' : 'var(--border-subtle)'
+            }; background: ${
+              clipboardActiveFilter === tab.key ? 'rgba(56,182,255,0.15)' : 'rgba(255,255,255,0.02)'
+            }; color: ${clipboardActiveFilter === tab.key ? 'var(--accent-solar)' : 'var(--text-secondary)'};"
+          >
+            ${tab.label}
+          </button>
+        `
+          )
+          .join('')}
+      </div>
+    </div>
+
+    <!-- Clips List -->
+    <div style="margin-top: 14px; display: flex; flex-direction: column; gap: 14px;">
       ${
-        clipboardHistory.length === 0
-          ? `<div style="padding: 24px; text-align: center; color: var(--text-muted); font-size: 12px;">
-              No synced clipboard history yet. Copy on your phone or send text from Mac above.
-            </div>`
-          : `<div style="display: flex; flex-direction: column; gap: 8px;">
-              ${clipboardHistory
-                .map(
-                  (item) => `
-                <div class="clipboard-history-row" style="display: flex; align-items: center; justify-content: space-between; background: rgba(255,255,255,0.02); border: 1px solid var(--border-subtle); border-radius: 8px; padding: 10px 14px;">
-                  <div style="display: flex; align-items: center; gap: 10px; overflow: hidden; margin-right: 12px;">
-                    <span class="badge" style="font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 4px; background: ${
-                      item.source.includes('Mac')
-                        ? 'rgba(255,110,50,0.15); color: var(--accent-solar);'
-                        : item.source.includes('Remote')
-                        ? 'rgba(192,132,252,0.15); color: var(--purple-neon);'
-                        : 'rgba(16,185,129,0.15); color: var(--emerald-ion);'
-                    }">
-                      ${item.source}
-                    </span>
-                    <span style="font-size: 12.5px; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
-                      ${item.text}
-                    </span>
-                  </div>
-                  <div style="display: flex; align-items: center; gap: 10px; flex-shrink: 0;">
-                    <span style="font-size: 11px; color: var(--text-muted);">${item.time}</span>
-                    <button class="btn-copy-history-item btn-luxury" data-text="${encodeURIComponent(item.text)}" style="padding: 4px 10px; font-size: 11px;">
-                      Copy
-                    </button>
-                  </div>
-                </div>
-              `
-                )
-                .join('')}
-            </div>`
+        filtered.length === 0
+          ? `
+        <div class="glass-card" style="padding: 36px 20px; text-align: center; color: var(--text-muted); font-size: 13px;">
+          ${clipboardSearchQuery ? 'No clips matching search query' : 'No clipboard history yet. Copy on your Mac or Phone to sync instantly.'}
+        </div>`
+          : `
+        ${
+          pinnedClips.length > 0
+            ? `
+          <div>
+            <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 8px; font-size: 11px; font-weight: 700; color: var(--accent-solar); letter-spacing: 0.8px;">
+              ${Icons.PinFilled(12, 'var(--accent-solar)')}
+              <span>PINNED (${pinnedClips.length})</span>
+            </div>
+            <div style="display: flex; flex-direction: column; gap: 6px;">
+              ${pinnedClips.map((item) => renderClipboardRow(item)).join('')}
+            </div>
+          </div>
+        `
+            : ''
+        }
+
+        ${
+          recentClips.length > 0
+            ? `
+          <div>
+            <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 8px; font-size: 11px; font-weight: 700; color: var(--text-muted); letter-spacing: 0.8px;">
+              <span>RECENT HISTORY (${recentClips.length})</span>
+            </div>
+            <div style="display: flex; flex-direction: column; gap: 6px;">
+              ${recentClips.map((item) => renderClipboardRow(item)).join('')}
+            </div>
+          </div>
+        `
+            : ''
+        }
+      `
       }
+    </div>
+  `;
+}
+
+function renderClipboardRow(item: ClipboardSnippet): string {
+  const isMac = item.source.toLowerCase().includes('mac');
+  return `
+    <div 
+      class="clipboard-history-row" 
+      data-id="${item.id}"
+      style="display: flex; align-items: center; justify-content: space-between; background: ${
+        item.pinned ? 'rgba(56,182,255,0.05)' : 'rgba(255,255,255,0.02)'
+      }; border: 1px solid ${
+        item.pinned ? 'rgba(56,182,255,0.35)' : 'var(--border-subtle)'
+      }; border-radius: 10px; padding: 8px 12px; transition: all 0.15s ease;"
+    >
+      <div style="display: flex; align-items: center; gap: 10px; overflow: hidden; margin-right: 12px; flex: 1;">
+        <span class="badge" style="font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 5px; flex-shrink: 0; background: ${
+          isMac ? 'rgba(56,182,255,0.15); color: var(--accent-solar);' : 'rgba(56,189,248,0.15); color: #38bdf8;'
+        }">
+          ${isMac ? 'Mac' : 'Phone'}
+        </span>
+        ${item.image_base64 ? `
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <img src="data:image/png;base64,${item.image_base64}" style="width: 38px; height: 38px; object-fit: cover; border-radius: 6px; border: 1px solid var(--border-subtle); flex-shrink: 0; display: inline-block;" />
+            <span style="font-size: 12px; color: #fff; font-weight: 600;">Screenshot / Image</span>
+          </div>
+        ` : `
+          <span 
+            style="font-size: 12.5px; font-family: monospace; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
+            title="${item.text.replace(/"/g, '&quot;')}"
+          >
+            ${item.text.replace(/</g, '&lt;').replace(/>/g, '&gt;')}
+          </span>
+        `}
+      </div>
+
+      <div style="display: flex; align-items: center; gap: 6px; flex-shrink: 0;">
+        <span style="font-size: 11px; color: var(--text-muted); margin-right: 4px;">${item.time || 'Just now'}</span>
+        
+        <!-- Pin Button -->
+        <button 
+          class="btn-pin-history-item btn-luxury" 
+          data-id="${item.id}" 
+          title="${item.pinned ? 'Unpin' : 'Pin to top'}"
+          style="padding: 4px 7px; border-radius: 6px; font-size: 11px; color: ${item.pinned ? 'var(--accent-solar)' : 'var(--text-muted)'};"
+        >
+          ${item.pinned ? Icons.PinFilled(13, 'var(--accent-solar)') : Icons.Pin(13, 'currentColor')}
+        </button>
+
+        <!-- Copy Button -->
+        <button 
+          class="btn-copy-history-item btn-luxury" 
+          ${item.image_base64 ? `data-image-id="${item.id}"` : `data-text="${encodeURIComponent(item.text)}"`} 
+          title="${item.image_base64 ? 'Copy image to clipboard (Cmd+V to paste)' : 'Copy to clipboard'}"
+          style="padding: 4px 9px; font-size: 11px; border-radius: 6px;"
+        >
+          Copy
+        </button>
+
+        <!-- Delete Button -->
+        <button 
+          class="btn-delete-history-item btn-luxury" 
+          data-id="${item.id}" 
+          title="Delete from history"
+          style="padding: 4px 6px; border-radius: 6px; font-size: 11px; color: var(--text-muted);"
+        >
+          ✕
+        </button>
+      </div>
     </div>
   `;
 }
@@ -4917,7 +6491,7 @@ function renderFilesView() {
           ? `
         <div class="multi-select-banner" style="margin-top: 4px;">
           <div style="display: flex; align-items: center; gap: 10px;">
-            <span class="badge" style="background: rgba(255, 110, 50, 0.2); color: var(--accent-solar); font-weight: 700; padding: 4px 10px; border-radius: 6px; font-size: 12px;">
+            <span class="badge" style="background: rgba(56, 182, 255, 0.2); color: var(--accent-solar); font-weight: 700; padding: 4px 10px; border-radius: 6px; font-size: 12px;">
               ${selectedFiles.size} item${selectedFiles.size > 1 ? 's' : ''} selected
             </span>
             <span style="font-size: 12px; color: var(--text-secondary);">Save directly to your Mac</span>
@@ -5008,7 +6582,7 @@ function renderFilesView() {
                   .map((f) => {
                     const isSelected = selectedFiles.has(f.path);
                     return `
-                  <tr style="border-bottom: 1px solid rgba(255,255,255,0.02); ${isSelected ? 'background: rgba(255, 110, 50, 0.05);' : ''}">
+                  <tr style="border-bottom: 1px solid rgba(255,255,255,0.02); ${isSelected ? 'background: rgba(56, 182, 255, 0.05);' : ''}">
                     <td style="padding: 8px 12px; width: 38px;">
                       <input type="checkbox" class="check-file-select" data-filepath="${f.path}" ${isSelected ? 'checked' : ''} style="cursor: pointer; accent-color: var(--accent-solar);" />
                     </td>
@@ -5106,7 +6680,7 @@ function renderPhotosView() {
           ? `
         <div class="multi-select-banner" style="margin-top: 4px;">
           <div style="display: flex; align-items: center; gap: 10px;">
-            <span class="badge" style="background: rgba(255, 110, 50, 0.2); color: var(--accent-solar); font-weight: 700; padding: 4px 10px; border-radius: 6px; font-size: 12px;">
+            <span class="badge" style="background: rgba(56, 182, 255, 0.2); color: var(--accent-solar); font-weight: 700; padding: 4px 10px; border-radius: 6px; font-size: 12px;">
               ${selectedPhotos.size} photo${selectedPhotos.size > 1 ? 's' : ''} selected
             </span>
             <span style="font-size: 12px; color: var(--text-secondary);">Save selected to your Mac</span>
@@ -5314,7 +6888,7 @@ function renderSettingsView() {
       <div style="display: flex; justify-content: space-between; align-items: center;">
         <div>
           <div style="font-size: 13.5px; font-weight: 700; color: #fff;">Idroid Desktop</div>
-          <div style="font-size: 11.5px; color: var(--text-secondary); margin-top: 2px;">Version 1.0.0 • Universal macOS, Windows & Linux Core</div>
+          <div style="font-size: 11.5px; color: var(--text-secondary); margin-top: 2px;">Version 1.0.0 • Native macOS & Android Bridge</div>
         </div>
         <button class="btn-luxury" style="font-size: 11.5px;">Check for Updates</button>
       </div>
@@ -5606,6 +7180,7 @@ function attachEventListeners() {
       if (val !== sanitized) {
         (e.target as HTMLInputElement).value = sanitized;
       }
+      updateFloatingDialerState();
     });
 
     inputDialer.addEventListener('keydown', (e) => {
@@ -5614,7 +7189,12 @@ function attachEventListeners() {
         handleStartCall();
       } else if (e.key === 'Escape') {
         e.preventDefault();
-        handleDialClear();
+        if (isFloatingKeypadOpen) {
+          isFloatingKeypadOpen = false;
+          render();
+        } else {
+          handleDialClear();
+        }
       }
     });
   }
@@ -5638,12 +7218,40 @@ function attachEventListeners() {
   const btnEndActiveCall = document.getElementById('btn-end-active-call');
   if (btnEndActiveCall) btnEndActiveCall.addEventListener('click', handleEndCall);
 
-  // Floating In-Call HUD Controls (Mute, Single-Button Route Switch, Record, Conference, End)
+  // Floating In-Call HUD Controls (Mute, 3-Way Route Switch, Record, Conference, End)
   const btnHudSwitch = document.getElementById('btn-hud-switch-device');
   if (btnHudSwitch) btnHudSwitch.addEventListener('click', () => handleToggleCallAudioRoute());
 
+  const btnHudRouteMac = document.getElementById('btn-hud-route-mac');
+  if (btnHudRouteMac) btnHudRouteMac.addEventListener('click', () => handleToggleCallAudioRoute('mac'));
+
+  const btnHudRouteSpeaker = document.getElementById('btn-hud-route-speaker');
+  if (btnHudRouteSpeaker) btnHudRouteSpeaker.addEventListener('click', () => handleToggleCallAudioRoute('phone_speaker'));
+
+  const btnHudRoutePhone = document.getElementById('btn-hud-route-phone');
+  if (btnHudRoutePhone) btnHudRoutePhone.addEventListener('click', () => handleToggleCallAudioRoute('phone'));
+
+  const btnHudRouteBt = document.getElementById('btn-hud-route-bt');
+  if (btnHudRouteBt) btnHudRouteBt.addEventListener('click', () => handleToggleCallAudioRoute('bluetooth'));
+
+  const btnConnectCallBt = document.getElementById('btn-connect-call-bt');
+  if (btnConnectCallBt) {
+    btnConnectCallBt.addEventListener('click', () => {
+      currentSection = 'settings';
+      render();
+    });
+  }
+
   const btnHudMute = document.getElementById('btn-hud-mute');
   if (btnHudMute) btnHudMute.addEventListener('click', handleToggleCallMute);
+
+  const btnHudKeypad = document.getElementById('btn-hud-keypad');
+  if (btnHudKeypad) {
+    btnHudKeypad.addEventListener('click', () => {
+      currentSection = 'calls';
+      render();
+    });
+  }
 
   const btnHudRecord = document.getElementById('btn-hud-record');
   if (btnHudRecord) btnHudRecord.addEventListener('click', handleToggleCallRecording);
@@ -5684,9 +7292,126 @@ function attachEventListeners() {
   const btnDeclineCall = document.getElementById('btn-decline-incoming-call');
   if (btnDeclineCall) btnDeclineCall.addEventListener('click', handleDeclineIncomingCall);
 
-  // Simulate Incoming Call (for testing and demo)
-  const btnSimulateCall = document.getElementById('btn-simulate-incoming-call');
-  if (btnSimulateCall) btnSimulateCall.addEventListener('click', handleSimulateIncomingCall);
+  // Floating Action Dock Triggers & Modals (Keypad & Contacts)
+  const btnOpenKeypadSheet = document.getElementById('btn-open-keypad-sheet');
+  if (btnOpenKeypadSheet) {
+    btnOpenKeypadSheet.addEventListener('click', () => {
+      isFloatingKeypadOpen = true;
+      render();
+      setTimeout(() => {
+        const inputEl = document.getElementById('input-dialer-number') as HTMLInputElement;
+        if (inputEl) {
+          inputEl.focus();
+          inputEl.selectionStart = inputEl.selectionEnd = inputEl.value.length;
+        }
+      }, 40);
+    });
+  }
+
+  const btnCloseFloatingKeypad = document.getElementById('btn-close-floating-keypad');
+  if (btnCloseFloatingKeypad) {
+    btnCloseFloatingKeypad.addEventListener('click', () => {
+      isFloatingKeypadOpen = false;
+      render();
+    });
+  }
+
+  const keypadModalBackdrop = document.getElementById('keypad-modal-backdrop');
+  if (keypadModalBackdrop) {
+    keypadModalBackdrop.addEventListener('click', (e) => {
+      if (e.target === keypadModalBackdrop) {
+        isFloatingKeypadOpen = false;
+        render();
+      }
+    });
+  }
+
+  const btnOpenContactsSheet = document.getElementById('btn-open-contacts-sheet');
+  if (btnOpenContactsSheet) {
+    btnOpenContactsSheet.addEventListener('click', () => {
+      isContactsDirectoryOpen = true;
+      render();
+      setTimeout(() => {
+        const inputEl = document.getElementById('input-search-contacts-directory') as HTMLInputElement;
+        if (inputEl) inputEl.focus();
+      }, 40);
+    });
+  }
+
+  const btnCloseContactsModal = document.getElementById('btn-close-contacts-modal');
+  if (btnCloseContactsModal) {
+    btnCloseContactsModal.addEventListener('click', () => {
+      isContactsDirectoryOpen = false;
+      render();
+    });
+  }
+
+  const contactsModalBackdrop = document.getElementById('contacts-modal-backdrop');
+  if (contactsModalBackdrop) {
+    contactsModalBackdrop.addEventListener('click', (e) => {
+      if (e.target === contactsModalBackdrop) {
+        isContactsDirectoryOpen = false;
+        render();
+      }
+    });
+  }
+
+  const btnSyncContactsModal = document.getElementById('btn-sync-phone-contacts-modal');
+  if (btnSyncContactsModal) {
+    btnSyncContactsModal.addEventListener('click', () => fetchPhoneContacts());
+  }
+
+  const btnOpenAddContactModal = document.getElementById('btn-open-add-contact-modal');
+  if (btnOpenAddContactModal) {
+    btnOpenAddContactModal.addEventListener('click', () => {
+      editingContactId = null;
+      newFavName = '';
+      newFavNumber = '';
+      isAddFavouriteModalOpen = true;
+      render();
+    });
+  }
+
+  const btnOpenAddFavCircle = document.getElementById('btn-open-add-fav-circle');
+  if (btnOpenAddFavCircle) {
+    btnOpenAddFavCircle.addEventListener('click', () => {
+      editingContactId = null;
+      newFavName = '';
+      newFavNumber = '';
+      isAddFavouriteModalOpen = true;
+      render();
+    });
+  }
+
+  // Real-time Search within Recent Call History
+  const inputSearchCallHistory = document.getElementById('input-search-call-history') as HTMLInputElement;
+  if (inputSearchCallHistory) {
+    inputSearchCallHistory.addEventListener('input', (e) => {
+      const query = (e.target as HTMLInputElement).value.trim().toLowerCase();
+      callHistorySearchQuery = (e.target as HTMLInputElement).value;
+      const rows = document.querySelectorAll('.call-history-row');
+      rows.forEach((row) => {
+        const text = (row.textContent || '').toLowerCase();
+        const match = !query || text.includes(query);
+        (row as HTMLElement).style.display = match ? 'flex' : 'none';
+      });
+    });
+  }
+
+  // Real-time Search within Contacts Directory
+  const inputSearchContacts = document.getElementById('input-search-contacts-directory') as HTMLInputElement;
+  if (inputSearchContacts) {
+    inputSearchContacts.addEventListener('input', (e) => {
+      const query = (e.target as HTMLInputElement).value.trim().toLowerCase();
+      contactsDirectorySearchQuery = (e.target as HTMLInputElement).value;
+      const cards = document.querySelectorAll('.contacts-directory-list .contact-card-premium');
+      cards.forEach((card) => {
+        const text = (card.textContent || '').toLowerCase();
+        const match = !query || text.includes(query);
+        (card as HTMLElement).style.display = match ? 'flex' : 'none';
+      });
+    });
+  }
 
   // Quick Contacts Speed Dial & Actions
   document.querySelectorAll('.btn-delete-fav').forEach((btn) => {
@@ -5697,9 +7422,42 @@ function attachEventListeners() {
     });
   });
 
+  // Edit contact
+  document.querySelectorAll('.btn-edit-contact').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const el = e.currentTarget as HTMLElement;
+      const contactId = el.getAttribute('data-contact-id') || '';
+      const name = el.getAttribute('data-name') || '';
+      const num = el.getAttribute('data-number') || '';
+      editingContactId = contactId;
+      newFavName = name;
+      newFavNumber = num;
+      isAddFavouriteModalOpen = true;
+      render();
+    });
+  });
+
+  // Toggle favorite star in Contacts Directory
+  document.querySelectorAll('.btn-toggle-fav-contact').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const el = e.currentTarget as HTMLElement;
+      const name = el.getAttribute('data-name') || '';
+      const num = el.getAttribute('data-number') || '';
+      if (num) handleToggleFavouriteContact(name, num);
+    });
+  });
+
+  const btnSyncPhoneContacts = document.getElementById('btn-sync-phone-contacts');
+  if (btnSyncPhoneContacts) {
+    btnSyncPhoneContacts.addEventListener('click', () => fetchPhoneContacts());
+  }
+
   const btnOpenAddFav = document.getElementById('btn-open-add-fav') || document.getElementById('btn-empty-add-fav');
   if (btnOpenAddFav) {
     btnOpenAddFav.addEventListener('click', () => {
+      editingContactId = null;
       newFavName = '';
       newFavNumber = '';
       isAddFavouriteModalOpen = true;
@@ -5713,6 +7471,7 @@ function attachEventListeners() {
       const el = e.currentTarget as HTMLElement;
       const num = el.getAttribute('data-number') || '';
       const name = el.getAttribute('data-name') || '';
+      editingContactId = null;
       newFavName = name !== num ? name : '';
       newFavNumber = num;
       isAddFavouriteModalOpen = true;
@@ -5723,6 +7482,7 @@ function attachEventListeners() {
   const btnCloseFavModal = document.getElementById('btn-close-fav-modal');
   if (btnCloseFavModal) {
     btnCloseFavModal.addEventListener('click', () => {
+      editingContactId = null;
       isAddFavouriteModalOpen = false;
       render();
     });
@@ -5731,6 +7491,7 @@ function attachEventListeners() {
   const btnCancelFavModal = document.getElementById('btn-cancel-fav-modal');
   if (btnCancelFavModal) {
     btnCancelFavModal.addEventListener('click', () => {
+      editingContactId = null;
       isAddFavouriteModalOpen = false;
       render();
     });
@@ -5740,6 +7501,7 @@ function attachEventListeners() {
   if (favModalBackdrop) {
     favModalBackdrop.addEventListener('click', (e) => {
       if (e.target === favModalBackdrop) {
+        editingContactId = null;
         isAddFavouriteModalOpen = false;
         render();
       }
@@ -5752,10 +7514,44 @@ function attachEventListeners() {
       const nameInput = document.getElementById('input-fav-name') as HTMLInputElement;
       const numInput = document.getElementById('input-fav-number') as HTMLInputElement;
       if (nameInput && numInput && nameInput.value.trim() && numInput.value.trim()) {
-        handleAddFavouriteContact(nameInput.value.trim(), numInput.value.trim());
+        if (editingContactId) {
+          handleEditFavouriteContact(editingContactId, nameInput.value.trim(), numInput.value.trim());
+        } else {
+          handleAddFavouriteContact(nameInput.value.trim(), numInput.value.trim());
+        }
       }
     });
   }
+
+  // Manual trigger to sync phone call history
+  const btnSyncHistoryNow = document.getElementById('btn-sync-phone-history-now');
+  if (btnSyncHistoryNow) {
+    btnSyncHistoryNow.addEventListener('click', async () => {
+      btnSyncHistoryNow.innerHTML = '<span>⏳</span> <span>Syncing...</span>';
+      await fetchCallsAndNotifications();
+      render();
+    });
+  }
+
+  // Clear all call history
+  const btnClearCallHistory = document.getElementById('btn-clear-call-history');
+  if (btnClearCallHistory) {
+    btnClearCallHistory.addEventListener('click', () => handleClearAllCallHistory());
+  }
+
+  // Delete individual call record
+  document.querySelectorAll('.btn-delete-call-history').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const el = e.currentTarget as HTMLElement;
+      const callId = el.getAttribute('data-call-id') || '';
+      const phoneId = el.getAttribute('data-phone-id') || undefined;
+      const num = el.getAttribute('data-number') || undefined;
+      if (callId) {
+        handleDeleteCallRecord(callId, phoneId, num);
+      }
+    });
+  });
 
   // Call history filter buttons
   document.querySelectorAll('.btn-call-filter').forEach((btn) => {
@@ -6109,6 +7905,10 @@ function attachEventListeners() {
   if (btnMacBt) {
     btnMacBt.addEventListener('click', () => executeQuickControl('mac_bluetooth'));
   }
+  const btnMacLoc = document.getElementById('btn-mac-location-badge');
+  if (btnMacLoc) {
+    btnMacLoc.addEventListener('click', () => executeQuickControl('mac_location'));
+  }
   const btnPhoneBt = document.getElementById('phone-bluetooth-badge');
   if (btnPhoneBt) {
     btnPhoneBt.addEventListener('click', () => executeQuickControl('phone_bluetooth'));
@@ -6164,6 +7964,151 @@ function attachEventListeners() {
   }
 
   attachQuickControlModalItemListeners();
+
+  // Mac Bluetooth Modal Events
+  const btnCloseMacBtModal = document.getElementById('btn-close-mac-bt-modal');
+  if (btnCloseMacBtModal) {
+    btnCloseMacBtModal.addEventListener('click', () => {
+      isMacBluetoothModalOpen = false;
+      render();
+    });
+  }
+
+  const macBtModalBackdrop = document.getElementById('mac-bt-modal-backdrop');
+  if (macBtModalBackdrop) {
+    macBtModalBackdrop.addEventListener('click', (e) => {
+      if (e.target === macBtModalBackdrop) {
+        isMacBluetoothModalOpen = false;
+        render();
+      }
+    });
+  }
+
+  const btnRefreshMacBt = document.getElementById('btn-refresh-mac-bt');
+  if (btnRefreshMacBt) {
+    btnRefreshMacBt.addEventListener('click', () => {
+      openMacBluetoothModal();
+    });
+  }
+
+  const btnOpenSysBtSettings = document.getElementById('btn-open-sys-bt-settings');
+  if (btnOpenSysBtSettings) {
+    btnOpenSysBtSettings.addEventListener('click', async () => {
+      const invoke = await getInvoke();
+      if (invoke) {
+        await invoke('open_mac_bluetooth_settings');
+      }
+    });
+  }
+
+  document.querySelectorAll('.btn-connect-mac-bt').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const addr = (e.currentTarget as HTMLElement).getAttribute('data-addr');
+      if (addr) connectMacBtDevice(addr);
+    });
+  });
+
+  document.querySelectorAll('.btn-disconnect-mac-bt').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const addr = (e.currentTarget as HTMLElement).getAttribute('data-addr');
+      if (addr) disconnectMacBtDevice(addr);
+    });
+  });
+
+  // Phone Bluetooth Modal Events
+  const btnClosePhoneBtModal = document.getElementById('btn-close-phone-bt-modal');
+  if (btnClosePhoneBtModal) {
+    btnClosePhoneBtModal.addEventListener('click', () => {
+      isPhoneBluetoothModalOpen = false;
+      render();
+    });
+  }
+
+  const phoneBtModalBackdrop = document.getElementById('phone-bt-modal-backdrop');
+  if (phoneBtModalBackdrop) {
+    phoneBtModalBackdrop.addEventListener('click', (e) => {
+      if (e.target === phoneBtModalBackdrop) {
+        isPhoneBluetoothModalOpen = false;
+        render();
+      }
+    });
+  }
+
+  const btnTogglePhoneBtPower = document.getElementById('btn-toggle-phone-bt-power');
+  if (btnTogglePhoneBtPower) {
+    btnTogglePhoneBtPower.addEventListener('click', () => {
+      togglePhoneBluetooth(!phoneBluetoothState.enabled);
+    });
+  }
+
+  const btnRefreshPhoneBt = document.getElementById('btn-refresh-phone-bt');
+  if (btnRefreshPhoneBt) {
+    btnRefreshPhoneBt.addEventListener('click', () => {
+      openPhoneBluetoothModal();
+    });
+  }
+
+  // Phone Wi-Fi Modal Events
+  const btnClosePhoneWifiModal = document.getElementById('btn-close-phone-wifi-modal');
+  if (btnClosePhoneWifiModal) {
+    btnClosePhoneWifiModal.addEventListener('click', () => {
+      isPhoneWifiModalOpen = false;
+      render();
+    });
+  }
+
+  const phoneWifiModalBackdrop = document.getElementById('phone-wifi-modal-backdrop');
+  if (phoneWifiModalBackdrop) {
+    phoneWifiModalBackdrop.addEventListener('click', (e) => {
+      if (e.target === phoneWifiModalBackdrop) {
+        isPhoneWifiModalOpen = false;
+        render();
+      }
+    });
+  }
+
+  const btnTogglePhoneWifiPower = document.getElementById('btn-toggle-phone-wifi-power');
+  if (btnTogglePhoneWifiPower) {
+    btnTogglePhoneWifiPower.addEventListener('click', () => {
+      togglePhoneWifi(!phoneWifiState.enabled);
+    });
+  }
+
+  const btnRefreshPhoneWifi = document.getElementById('btn-refresh-phone-wifi');
+  if (btnRefreshPhoneWifi) {
+    btnRefreshPhoneWifi.addEventListener('click', () => {
+      openPhoneWifiModal();
+    });
+  }
+
+  // Phone Card Badges
+  const phoneBtBadge = document.getElementById('phone-bluetooth-badge');
+  if (phoneBtBadge) {
+    phoneBtBadge.addEventListener('click', () => {
+      openPhoneBluetoothModal();
+    });
+  }
+
+  const phoneWifiBadge = document.getElementById('phone-wifi-badge');
+  if (phoneWifiBadge) {
+    phoneWifiBadge.addEventListener('click', () => {
+      openPhoneWifiModal();
+    });
+  }
+
+  const phoneLocationBadge = document.getElementById('phone-location-badge');
+  if (phoneLocationBadge) {
+    phoneLocationBadge.addEventListener('click', () => {
+      togglePhoneLocation();
+    });
+  }
+
+  const phoneHotspotBadge = document.getElementById('phone-hotspot-badge');
+  if (phoneHotspotBadge) {
+    phoneHotspotBadge.addEventListener('click', () => {
+      openPhoneWifiModal();
+    });
+  }
 
   const btnSendFileToPhone = document.getElementById('btn-send-file-to-phone');
   const inputSendFile = document.getElementById('input-send-file-to-phone') as HTMLInputElement | null;
@@ -6249,9 +8194,25 @@ function attachEventListeners() {
     });
   }
 
+  const btnOpenDoctorNav = document.getElementById('btn-open-doctor-nav');
+  if (btnOpenDoctorNav) {
+    btnOpenDoctorNav.addEventListener('click', () => {
+      isDoctorModalOpen = true;
+      render();
+    });
+  }
+
   const btnOpenDoctorPairing = document.getElementById('btn-open-doctor-pairing');
   if (btnOpenDoctorPairing) {
     btnOpenDoctorPairing.addEventListener('click', () => {
+      isDoctorModalOpen = true;
+      render();
+    });
+  }
+
+  const btnOpenDoctorOnboarding = document.getElementById('btn-open-doctor-onboarding');
+  if (btnOpenDoctorOnboarding) {
+    btnOpenDoctorOnboarding.addEventListener('click', () => {
       isDoctorModalOpen = true;
       render();
     });
@@ -6262,6 +8223,51 @@ function attachEventListeners() {
     btnCloseDoctorModal.addEventListener('click', () => {
       isDoctorModalOpen = false;
       render();
+    });
+  }
+
+  const btnOpenDownloadModal = document.getElementById('btn-open-download-modal');
+  if (btnOpenDownloadModal) {
+    btnOpenDownloadModal.addEventListener('click', () => {
+      isApkModalOpen = true;
+      render();
+    });
+  }
+
+  const btnOpenDownloadOnboarding = document.getElementById('btn-open-download-onboarding');
+  if (btnOpenDownloadOnboarding) {
+    btnOpenDownloadOnboarding.addEventListener('click', () => {
+      isApkModalOpen = true;
+      render();
+    });
+  }
+
+  const btnCloseApkModal = document.getElementById('btn-close-apk-modal');
+  if (btnCloseApkModal) {
+    btnCloseApkModal.addEventListener('click', () => {
+      isApkModalOpen = false;
+      render();
+    });
+  }
+
+  const apkBackdrop = document.getElementById('apk-modal-backdrop');
+  if (apkBackdrop) {
+    apkBackdrop.addEventListener('click', (e) => {
+      if (e.target === apkBackdrop) {
+        isApkModalOpen = false;
+        render();
+      }
+    });
+  }
+
+  const btnCopyApkUrl = document.getElementById('btn-copy-apk-url');
+  if (btnCopyApkUrl) {
+    btnCopyApkUrl.addEventListener('click', () => {
+      navigator.clipboard.writeText('https://github.com/idroid/idroid/releases/latest');
+      btnCopyApkUrl.innerHTML = 'Copied Link!';
+      setTimeout(() => {
+        btnCopyApkUrl.innerHTML = 'Copy Download Link';
+      }, 1500);
     });
   }
 
@@ -6405,8 +8411,25 @@ function attachEventListeners() {
 
   // History Snippet Copy buttons
   document.querySelectorAll('.btn-copy-history-item').forEach((btn) => {
-    btn.addEventListener('click', (e) => {
+    btn.addEventListener('click', async (e) => {
       const targetBtn = e.currentTarget as HTMLElement;
+      const imgId = targetBtn.getAttribute('data-image-id');
+      if (imgId) {
+        const item = clipboardHistory.find((i) => i.id === imgId);
+        if (item && item.image_base64) {
+          const invoke = await getInvoke();
+          await invoke('copy_image_to_clipboard', { imageBase64: item.image_base64 });
+          const originalText = targetBtn.innerHTML;
+          targetBtn.innerHTML = 'Copied!';
+          targetBtn.style.color = 'var(--emerald-ion)';
+          setTimeout(() => {
+            targetBtn.innerHTML = originalText;
+            targetBtn.style.color = '';
+          }, 1200);
+          return;
+        }
+      }
+
       const rawText = targetBtn.getAttribute('data-text');
       if (rawText) {
         const text = decodeURIComponent(rawText);
@@ -6418,6 +8441,123 @@ function attachEventListeners() {
           targetBtn.innerHTML = originalText;
           targetBtn.style.color = '';
         }, 1200);
+      }
+    });
+  });
+
+  // Pin / Unpin clipboard item
+  document.querySelectorAll('.btn-pin-history-item').forEach((btn) => {
+    btn.addEventListener('click', async (e) => {
+      const id = (e.currentTarget as HTMLElement).getAttribute('data-id');
+      if (id) {
+        const invoke = await getInvoke();
+        if (invoke) {
+          try {
+            clipboardHistory = await invoke('toggle_pin_clipboard', { id });
+          } catch (_) {
+            const item = clipboardHistory.find((i) => i.id === id);
+            if (item) item.pinned = !item.pinned;
+          }
+          render();
+        }
+      }
+    });
+  });
+
+  // Delete clipboard item
+  document.querySelectorAll('.btn-delete-history-item').forEach((btn) => {
+    btn.addEventListener('click', async (e) => {
+      const id = (e.currentTarget as HTMLElement).getAttribute('data-id');
+      if (id) {
+        const invoke = await getInvoke();
+        if (invoke) {
+          try {
+            clipboardHistory = await invoke('delete_clipboard_entry', { id });
+          } catch (_) {
+            clipboardHistory = clipboardHistory.filter((i) => i.id !== id);
+          }
+          render();
+        }
+      }
+    });
+  });
+
+  // Clear clipboard history
+  const btnClearHistory = document.getElementById('btn-clear-clipboard-history');
+  if (btnClearHistory) {
+    btnClearHistory.addEventListener('click', async () => {
+      const invoke = await getInvoke();
+      if (invoke) {
+        try {
+          clipboardHistory = await invoke('clear_clipboard_history');
+        } catch (_) {
+          clipboardHistory = clipboardHistory.filter((i) => i.pinned);
+        }
+        render();
+      }
+    });
+  }
+
+  // Refresh clipboard history
+  const btnRefreshClipboard = document.getElementById('btn-refresh-clipboard');
+  if (btnRefreshClipboard) {
+    btnRefreshClipboard.addEventListener('click', async () => {
+      const invoke = await getInvoke();
+      if (invoke) {
+        try {
+          clipboardHistory = await invoke('get_clipboard_history');
+          render();
+        } catch (_) {}
+      }
+    });
+  }
+
+  // Push text to phone
+  const inputPushPhone = document.getElementById('input-push-phone') as HTMLInputElement | null;
+  const btnPushToPhone = document.getElementById('btn-push-to-phone');
+  if (inputPushPhone) {
+    inputPushPhone.addEventListener('input', (e) => {
+      pushToPhoneInput = (e.target as HTMLInputElement).value;
+    });
+    inputPushPhone.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        handlePasteToPhone();
+      }
+    });
+  }
+  if (btnPushToPhone) {
+    btnPushToPhone.addEventListener('click', handlePasteToPhone);
+  }
+
+  // Search input & Clear search
+  const clipboardSearchInput = document.getElementById('clipboard-search-input') as HTMLInputElement | null;
+  if (clipboardSearchInput) {
+    clipboardSearchInput.addEventListener('input', (e) => {
+      clipboardSearchQuery = (e.target as HTMLInputElement).value;
+      render();
+      const el = document.getElementById('clipboard-search-input') as HTMLInputElement | null;
+      if (el) {
+        el.focus();
+        el.setSelectionRange(el.value.length, el.value.length);
+      }
+    });
+  }
+
+  const btnClearSearch = document.getElementById('btn-clear-search');
+  if (btnClearSearch) {
+    btnClearSearch.addEventListener('click', () => {
+      clipboardSearchQuery = '';
+      render();
+    });
+  }
+
+  // Filter tabs
+  document.querySelectorAll('.clipboard-filter-tab').forEach((tab) => {
+    tab.addEventListener('click', (e) => {
+      const filter = (e.currentTarget as HTMLElement).getAttribute('data-filter') as any;
+      if (filter) {
+        clipboardActiveFilter = filter;
+        render();
       }
     });
   });
@@ -6448,7 +8588,7 @@ function attachEventListeners() {
       if (device.status === 'Connected') {
         render();
       } else {
-        await generatePairingQRs();
+        await generatePairingQRs(true);
         render();
       }
     });
@@ -6458,7 +8598,8 @@ function attachEventListeners() {
   if (btnCopyPairingLink) {
     btnCopyPairingLink.addEventListener('click', () => {
       if (pairingPayload) {
-        const link = `idroid://pair?ip=${pairingPayload.ip}&port=${pairingPayload.port}&token=${pairingPayload.token}&name=${encodeURIComponent(pairingPayload.name)}`;
+        const ssidParam = pairingPayload.ssid ? `&ssid=${encodeURIComponent(pairingPayload.ssid)}` : '';
+        const link = `idroid://pair?ip=${pairingPayload.ip}&port=${pairingPayload.port}&token=${pairingPayload.token}&name=${encodeURIComponent(pairingPayload.name)}${ssidParam}`;
         navigator.clipboard.writeText(link);
         const originalText = btnCopyPairingLink.innerHTML;
         btnCopyPairingLink.innerHTML = '<span>Copied Link!</span>';
@@ -6503,6 +8644,36 @@ function attachEventListeners() {
       pollDeviceTelemetry();
     });
   });
+
+  const btnRejectAuth = document.getElementById('btn-reject-device-auth');
+  if (btnRejectAuth && activeDeviceAuthRequest) {
+    const reqId = activeDeviceAuthRequest.request_id;
+    btnRejectAuth.addEventListener('click', async () => {
+      const invoke = await getInvoke();
+      if (invoke) {
+        try {
+          await invoke('reject_device_authorization', { requestId: reqId });
+        } catch (_) {}
+      }
+      activeDeviceAuthRequest = null;
+      render();
+    });
+  }
+
+  const btnApproveAuth = document.getElementById('btn-approve-device-auth');
+  if (btnApproveAuth && activeDeviceAuthRequest) {
+    const reqId = activeDeviceAuthRequest.request_id;
+    btnApproveAuth.addEventListener('click', async () => {
+      const invoke = await getInvoke();
+      if (invoke) {
+        try {
+          await invoke('approve_device_authorization', { requestId: reqId });
+        } catch (_) {}
+      }
+      activeDeviceAuthRequest = null;
+      render();
+    });
+  }
 
   attachQuickAppListeners();
   setupStickyHeaderScrollBehavior();
@@ -6575,12 +8746,118 @@ async function setupWindowControls() {
     console.warn('Tauri window API not available:', err);
   }
 }
+// Real-time bidirectional Tauri events from Android & Rust daemon
+async function setupRealtimeCallListeners() {
+  const listen = await getListen();
+  if (!listen) return;
+
+  try {
+    // 1. Live phone call state changes pushed directly from Android TCP & telephony registry
+    await listen('call_state_changed', (event: any) => {
+      const callState = event.payload as CallStateInfo;
+      if (!callState) return;
+      console.log('[Idroid Calls Event] Live call state received:', callState.state);
+
+      if (isCallActive && callState.state === 'idle') {
+        console.log('[Idroid Calls Event] Call ended on phone; syncing to idle immediately');
+        handleRemoteCallEnded();
+      } else if (callState.is_ringing && !incomingCall && !isCallActive) {
+        const rawNum = callState.number || 'Unknown Caller';
+        const cleanNum = rawNum.replace(/[\s-]/g, '');
+        const matchedContact = favouriteContacts.find(c => c.number.replace(/[\s-]/g, '') === cleanNum) ||
+                               phoneContacts.find(c => c.number.replace(/[\s-]/g, '') === cleanNum);
+        const matchedHistory = callHistory.find(c => c.number.replace(/[\s-]/g, '') === cleanNum);
+        incomingCall = {
+          name: matchedContact?.name || matchedHistory?.name || (callState.name || rawNum),
+          number: rawNum,
+        };
+        render();
+      } else if (!callState.is_ringing && incomingCall) {
+        if (callState.state === 'active') {
+          const targetNum = incomingCall.number;
+          const targetName = incomingCall.name;
+          incomingCall = null;
+          activeCallTarget = targetNum;
+          activeCallTargetName = targetName;
+          isCallActive = true;
+          callDurationSec = 0;
+          if (callDurationTimer) clearInterval(callDurationTimer);
+          callDurationTimer = setInterval(() => {
+            callDurationSec++;
+            const timerEl = document.getElementById('hud-call-timer') || document.getElementById('active-call-timer');
+            if (timerEl) {
+              const mins = Math.floor(callDurationSec / 60).toString().padStart(2, '0');
+              const secs = (callDurationSec % 60).toString().padStart(2, '0');
+              timerEl.textContent = `${mins}:${secs}`;
+            }
+          }, 1000);
+          render();
+        } else {
+          incomingCall = null;
+          render();
+        }
+      }
+    });
+
+    // 2. Real-time phone call history updates pushed when phone call log changes
+    await listen('phone_call_history_updated', (event: any) => {
+      const records = event.payload as CallRecord[];
+      if (records && Array.isArray(records)) {
+        console.log('[Idroid Calls Event] Real-time phone call history update:', records.length);
+        callHistory = records;
+        try {
+          localStorage.setItem('idroid_call_history', JSON.stringify(callHistory));
+        } catch (_) {}
+        if (currentSection === 'calls' || currentSection === 'dashboard') {
+          render();
+        }
+      }
+    });
+
+    // 3. Real-time phone contacts updates pushed when phone contacts change
+    await listen('phone_contacts_updated', (event: any) => {
+      const payload = event.payload;
+      const contacts = (payload && Array.isArray(payload.contacts)) 
+        ? (payload.contacts as PhoneContact[]) 
+        : (Array.isArray(payload) ? (payload as PhoneContact[]) : null);
+      if (contacts && Array.isArray(contacts) && contacts.length > 0) {
+        console.log('[Idroid Calls Event] Real-time phone contacts update:', contacts.length);
+        phoneContacts = contacts;
+        try {
+          localStorage.setItem('idroid_synced_phone_contacts', JSON.stringify(phoneContacts));
+          localStorage.setItem('idroid_phone_contacts', JSON.stringify(phoneContacts));
+          localStorage.setItem('idroid_last_contacts_sync', Date.now().toString());
+        } catch (_) {}
+        if (currentSection === 'calls' || currentSection === 'dashboard') {
+          render();
+        }
+      }
+    });
+
+    // 4. Strict Security: Live unauthorized device connection request
+    await listen('device_authorization_requested', (event: any) => {
+      console.log('[Idroid Security Event] Device authorization requested:', event.payload);
+      activeDeviceAuthRequest = event.payload as DeviceAuthRequest;
+      render();
+    });
+
+    await listen('device_authorization_resolved', () => {
+      activeDeviceAuthRequest = null;
+      render();
+    });
+  } catch (err) {
+    console.warn('[Idroid Calls Event] Error setting up event listeners:', err);
+  }
+}
+
 // Robust Bootstrap Router (Main Desktop Dashboard)
 function bootstrap() {
   console.log('[Idroid UI] Initializing main dashboard view...');
   try {
     setupWindowControls();
+    setupRealtimeCallListeners();
     attachGlobalClickRipples();
+    attachPrivacyMaskGlobalListener();
     generatePairingQRs();
 
     // Global keyboard listener for dialer when in calls section
@@ -6600,7 +8877,13 @@ function bootstrap() {
         handleStartCall();
       } else if (e.key === 'Escape') {
         e.preventDefault();
-        if (isCallActive) {
+        if (isFloatingKeypadOpen) {
+          isFloatingKeypadOpen = false;
+          render();
+        } else if (isContactsDirectoryOpen) {
+          isContactsDirectoryOpen = false;
+          render();
+        } else if (isCallActive) {
           handleEndCall();
         } else {
           handleDialClear();
@@ -6615,18 +8898,49 @@ function bootstrap() {
 
   fetchQuickPhoneApps();
   fetchPhoneApps();
+  fetchPhoneContacts();
   fetchCallsAndNotifications();
   pollDeviceTelemetry();
-  setInterval(pollDeviceTelemetry, 6000);
+  const scheduleTelemetry = () => {
+    const interval = device.status === 'Connected' ? 3500 : 1200;
+    setTimeout(async () => {
+      await pollDeviceTelemetry();
+      scheduleTelemetry();
+    }, interval);
+  };
+  scheduleTelemetry();
+
+  pollCallStateSync();
+  const scheduleCallSync = () => {
+    // 800ms when call is active or ringing to ensure immediate state transitions (e.g. phone hanging up),
+    // 1800ms when idle connected, 3500ms when disconnected (power saving)
+    const interval = (isCallActive || incomingCall) ? 800 : (device.status === 'Connected' ? 1800 : 3500);
+    setTimeout(async () => {
+      await pollCallStateSync();
+      scheduleCallSync();
+    }, interval);
+  };
+  scheduleCallSync();
   pollCameraStreamStatus();
   setInterval(pollCameraStreamStatus, 1000);
 
-  // Position sync for mirror navigation dock (lightweight 250ms interval, only when dock is enabled)
+  // Periodically verify and refresh pairing QR if IP address changes while disconnected
+  setInterval(() => {
+    if (device.status !== 'Connected') {
+      generatePairingQRs(false);
+    }
+  }, 4000);
+
+  // Position sync for mirror navigation dock (only when mirror section is active and dock is enabled)
   setInterval(async () => {
     if (!isDockNavActive) return;
     const inv = await getInvoke();
     if (inv) {
-      inv('sync_mirror_dock', { visible: true });
+      if (currentSection === 'mirror') {
+        inv('sync_mirror_dock', { visible: true });
+      } else {
+        inv('sync_mirror_dock', { visible: false });
+      }
     }
   }, 250);
 }

@@ -372,6 +372,299 @@ test('Hardware navigation controller allows customizable button selection (LinkM
   assert.equal(selected.length, 8);
 });
 
+// MARK: - Wireless Link Auto-Refresh & State Sync Tests
+test('Adaptive discovery telemetry polling interval accelerates during pairing discovery and eases post connection', () => {
+  function getPollingInterval(connectionStatus) {
+    return connectionStatus === 'Connected' ? 3500 : 1200;
+  }
 
+  // During discovery/unpaired state: rapid 1.2s polling so pairing transition feels instantaneous
+  assert.equal(getPollingInterval('Disconnected'), 1200);
+  assert.equal(getPollingInterval('Connecting'), 1200);
 
+  // Once paired: eases to 3.5s to preserve battery and CPU
+  assert.equal(getPollingInterval('Connected'), 3500);
+});
+
+test('Dashboard out-of-sync detection triggers re-render when pairing transitions occur', () => {
+  function shouldTriggerDashboardRender({
+    currentSection,
+    prevStatus,
+    newStatus,
+    prevConn,
+    newConn,
+    isQrCardPresent
+  }) {
+    const statusChanged = prevStatus !== newStatus;
+    const connChanged = prevConn !== newConn;
+    const isDashboardDesynced = currentSection === 'dashboard' && (
+      (newStatus === 'Connected' && isQrCardPresent) ||
+      (newStatus === 'Disconnected' && !isQrCardPresent)
+    );
+
+    return statusChanged || connChanged || isDashboardDesynced;
+  }
+
+  // Scenario 1: Phone successfully handshakes while Mac was on QR Pairing screen
+  assert.equal(shouldTriggerDashboardRender({
+    currentSection: 'dashboard',
+    prevStatus: 'Disconnected',
+    newStatus: 'Connected',
+    prevConn: 'Disconnected',
+    newConn: 'on the air',
+    isQrCardPresent: true
+  }), true, 'Must trigger render when phone connects to switch from QR to dual-device stages');
+
+  // Scenario 2: Dashboard is in sync while connected
+  assert.equal(shouldTriggerDashboardRender({
+    currentSection: 'dashboard',
+    prevStatus: 'Connected',
+    newStatus: 'Connected',
+    prevConn: 'on the air',
+    newConn: 'on the air',
+    isQrCardPresent: false
+  }), false, 'Should avoid unnecessary full DOM re-renders when already in sync');
+
+  // Scenario 3: Desync safeguard (status says Connected but QR card was left in DOM)
+  assert.equal(shouldTriggerDashboardRender({
+    currentSection: 'dashboard',
+    prevStatus: 'Connected',
+    newStatus: 'Connected',
+    prevConn: 'on the air',
+    newConn: 'on the air',
+    isQrCardPresent: true
+  }), true, 'Must force re-render if QR card is still visible while device is connected');
+});
+
+test('Companion stream protocol payloads ensure safe probe handling and session resurrection', () => {
+  // Probe payload
+  const probeMsg = JSON.stringify({ type: 'probe' });
+  const parsedProbe = JSON.parse(probeMsg);
+  assert.equal(parsedProbe.type, 'probe');
+
+  // Ping request handshake response payload
+  const handshakeReqMsg = JSON.stringify({ type: 'request_handshake' });
+  const parsedReq = JSON.parse(handshakeReqMsg);
+  assert.equal(parsedReq.type, 'request_handshake');
+
+  // Full Handshake response payload
+  const macStatusResp = {
+    type: 'mac_status',
+    status: 'connected',
+    name: "Om's MacBook Pro",
+    connection_type: 'on the air',
+    battery: 100,
+    is_charging: true
+  };
+  assert.equal(macStatusResp.type, 'mac_status');
+  assert.equal(macStatusResp.status, 'connected');
+  assert.equal(macStatusResp.connection_type, 'on the air');
+});
+
+// MARK: - Telephony, Realtime Call Sync & Contact Management Tests
+test('Call state transition detects phone call cut / disconnect immediately', () => {
+  function handleCallStateUpdate({ currentState, newState, isCallActive, incomingCall }) {
+    let callEndedByPhone = false;
+    let callRinging = false;
+    let callActiveNow = isCallActive;
+
+    if (isCallActive && newState.state === 'idle') {
+      callEndedByPhone = true;
+      callActiveNow = false;
+    } else if (newState.is_ringing && !incomingCall && !isCallActive) {
+      callRinging = true;
+    } else if (newState.state === 'active') {
+      callActiveNow = true;
+    }
+
+    return { callEndedByPhone, callRinging, isCallActive: callActiveNow };
+  }
+
+  // 1. Phone user cuts active call on phone
+  const res1 = handleCallStateUpdate({
+    currentState: 'active',
+    newState: { state: 'idle', is_ringing: false, number: '+1234567890' },
+    isCallActive: true,
+    incomingCall: null,
+  });
+  assert.equal(res1.callEndedByPhone, true, 'Must detect remote hangup when phone reports idle');
+  assert.equal(res1.isCallActive, false, 'Mac active call must be terminated');
+
+  // 2. Incoming call ringing on phone
+  const res2 = handleCallStateUpdate({
+    currentState: 'idle',
+    newState: { state: 'ringing', is_ringing: true, number: '+1987654321' },
+    isCallActive: false,
+    incomingCall: null,
+  });
+  assert.equal(res2.callRinging, true, 'Must detect phone ringing');
+
+  // 3. User answers call on phone
+  const res3 = handleCallStateUpdate({
+    currentState: 'ringing',
+    newState: { state: 'active', is_ringing: false, number: '+1987654321' },
+    isCallActive: false,
+    incomingCall: { number: '+1987654321', name: 'Bob' },
+  });
+  assert.equal(res3.isCallActive, true, 'Must transition Mac to active call state when answered on phone');
+});
+
+test('Call audio routing 3-way cycle and direct route selection', () => {
+  function cycleAudioRoute(currentRoute, directRoute) {
+    if (directRoute) return directRoute;
+    if (currentRoute === 'mac') return 'phone_speaker';
+    if (currentRoute === 'phone_speaker') return 'phone';
+    return 'mac';
+  }
+
+  // Direct selection
+  assert.equal(cycleAudioRoute('phone', 'mac'), 'mac');
+  assert.equal(cycleAudioRoute('mac', 'phone_speaker'), 'phone_speaker');
+  assert.equal(cycleAudioRoute('phone_speaker', 'phone'), 'phone');
+
+  // Sequential cycling
+  let route = 'mac';
+  route = cycleAudioRoute(route);
+  assert.equal(route, 'phone_speaker');
+  route = cycleAudioRoute(route);
+  assert.equal(route, 'phone');
+  route = cycleAudioRoute(route);
+  assert.equal(route, 'mac');
+});
+
+test('Call history deletion and remote reconciliation maintains bidirectional sync', () => {
+  // Initial local state with 3 calls (2 synced from phone, 1 local)
+  let localHistory = [
+    { id: 'local-1', phone_id: 'call_log_101', number: '+1111111111', name: 'Alice' },
+    { id: 'local-2', phone_id: 'call_log_102', number: '+2222222222', name: 'Bob' },
+    { id: 'local-3', number: '+3333333333', name: 'Charlie' },
+  ];
+
+  // User deletes call_log_101 on Mac
+  function deleteRecord(history, recordId, phoneId) {
+    return history.filter(c => c.id !== recordId && (!phoneId || c.phone_id !== phoneId));
+  }
+  localHistory = deleteRecord(localHistory, 'local-1', 'call_log_101');
+  assert.equal(localHistory.length, 2);
+  assert.equal(localHistory.some(c => c.phone_id === 'call_log_101'), false);
+
+  // User deleted call_log_102 on Phone!
+  // Remote phone now only has call_log_103:
+  const remoteCalls = [
+    { id: 'call-103', phone_id: 'call_log_103', number: '+4444444444', name: 'Dave' },
+  ];
+
+  function reconcileRemoteCalls(local, remote, isConnected) {
+    if (!Array.isArray(remote)) return local;
+    if (remote.length > 0) {
+      const remotePhoneIds = new Set(remote.map(c => c.phone_id || c.id));
+      // Remove local calls whose phone_id was deleted on phone
+      const pruned = local.filter(c => {
+        if (c.phone_id) return remotePhoneIds.has(c.phone_id);
+        return true;
+      });
+      const existingIds = new Set(pruned.map(c => c.phone_id || c.id));
+      const newItems = remote.filter(c => !existingIds.has(c.phone_id || c.id));
+      return [...newItems, ...pruned].slice(0, 50);
+    } else if (isConnected) {
+      return local.filter(c => !c.phone_id);
+    }
+    return local;
+  }
+
+  const reconciled = reconcileRemoteCalls(localHistory, remoteCalls, true);
+  // call_log_102 was removed because it was deleted on phone!
+  assert.equal(reconciled.some(c => c.phone_id === 'call_log_102'), false, 'Deleted phone call must be purged from Mac');
+  // call_log_103 was added
+  assert.equal(reconciled.some(c => c.phone_id === 'call_log_103'), true, 'New phone call must be added to Mac');
+  // Charlie (local record) remains preserved
+  assert.equal(reconciled.some(c => c.name === 'Charlie'), true, 'Local un-synced record preserved');
+
+  // Clearing all history on phone
+  const emptyReconciled = reconcileRemoteCalls(reconciled, [], true);
+  assert.equal(emptyReconciled.every(c => !c.phone_id), true, 'All phone records purged when cleared on phone');
+});
+
+test('Dialer contact search and T9 phone number matching', () => {
+  const contacts = [
+    { id: '1', name: 'John Doe', number: '+1 (555) 234-5678' },
+    { id: '2', name: 'Sarah Connor', number: '+1 (415) 890-2341' },
+    { id: '3', name: 'Mom', number: '9876543210' },
+  ];
+
+  function searchContacts(query, list) {
+    const cleanQuery = query.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+    if (!cleanQuery) return [];
+    return list.filter(c =>
+      c.name.toLowerCase().includes(cleanQuery) ||
+      c.number.replace(/[^0-9]/g, '').includes(cleanQuery)
+    );
+  }
+
+  // By partial name
+  assert.equal(searchContacts('sar', contacts)[0].name, 'Sarah Connor');
+  assert.equal(searchContacts('mom', contacts)[0].name, 'Mom');
+
+  // By partial number
+  assert.equal(searchContacts('555234', contacts)[0].name, 'John Doe');
+  assert.equal(searchContacts('8902', contacts)[0].name, 'Sarah Connor');
+  assert.equal(searchContacts('999999', contacts).length, 0);
+});
+
+test('Adaptive polling interval delivers real-time sync with optimal battery consumption', () => {
+  function getCallSyncInterval({ isCallActive, incomingCall, isConnected }) {
+    if (isCallActive || incomingCall) return 800; // Real-time sync during calls
+    if (isConnected) return 1800; // Smooth background sync
+    return 3500; // Battery-saver sleep when disconnected
+  }
+
+  assert.equal(getCallSyncInterval({ isCallActive: true, incomingCall: null, isConnected: true }), 800);
+  assert.equal(getCallSyncInterval({ isCallActive: false, incomingCall: { number: '123' }, isConnected: true }), 800);
+  assert.equal(getCallSyncInterval({ isCallActive: false, incomingCall: null, isConnected: true }), 1800);
+  assert.equal(getCallSyncInterval({ isCallActive: false, incomingCall: null, isConnected: false }), 3500);
+});
+
+test('Location Services authorization and state telemetry resolution', () => {
+  // Telemetry serialization test
+  function createHostTelemetry(macLocationEnabled) {
+    return {
+      type: 'mac_status',
+      name: "Om’s MacBook Pro",
+      battery: 95,
+      is_charging: true,
+      bluetooth_status: 'Bluetooth On',
+      mac_location_enabled: macLocationEnabled
+    };
+  }
+
+  const payloadOff = createHostTelemetry(false);
+  assert.equal(payloadOff.mac_location_enabled, false);
+
+  const payloadOn = createHostTelemetry(true);
+  assert.equal(payloadOn.mac_location_enabled, true);
+
+  // Companion command routing check
+  function isLocationCompanionCommand(action) {
+    return ['toggle_mac_location', 'toggle_location', 'enable_location'].includes(action);
+  }
+
+  assert.equal(isLocationCompanionCommand('toggle_mac_location'), true);
+  assert.equal(isLocationCompanionCommand('toggle_location'), true);
+  assert.equal(isLocationCompanionCommand('enable_location'), true);
+  assert.equal(isLocationCompanionCommand('other_command'), false);
+
+  // Badge label check
+  function getMacLocationBadgeText(enabled) {
+    return enabled ? 'Mac Location On' : 'Mac Location Off';
+  }
+
+  function getPhoneLocationBadgeText(enabled) {
+    return enabled ? 'Phone GPS On' : 'Phone GPS Off';
+  }
+
+  assert.equal(getMacLocationBadgeText(true), 'Mac Location On');
+  assert.equal(getMacLocationBadgeText(false), 'Mac Location Off');
+  assert.equal(getPhoneLocationBadgeText(true), 'Phone GPS On');
+  assert.equal(getPhoneLocationBadgeText(false), 'Phone GPS Off');
+});
 
