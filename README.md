@@ -108,19 +108,39 @@ Idroid utilizes a high-performance hybrid architecture designed for raw throughp
 
 ---
 
-## 🛠️ Getting Started
+## ⚡️ Quick Install
+
+### Option 1: 1-Line Installer (Recommended)
+Automatically downloads the latest Universal 2 DMG, installs Idroid into `/Applications`, and configures macOS Gatekeeper permissions:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Being-Glad/Idroid/main/install.sh | bash
+```
+
+### Option 2: Download DMG from Releases
+1. Download **`Idroid_1.0.0_universal.dmg`** from the [Latest Release](https://github.com/Being-Glad/Idroid/releases/latest).
+2. Open the disk image and drag **`Idroid.app`** into your **Applications** folder.
+3. *First Launch Note*: Because Idroid is community open-source, modern macOS Gatekeeper may prompt `"Idroid.app" Not Opened`. Run this one command to approve it immediately:
+   ```bash
+   xattr -cr /Applications/Idroid.app
+   ```
+   *(Alternatively, go to **System Settings** → **Privacy & Security** and click **"Open Anyway"**).*
+
+---
+
+## 🛠️ Build From Source
 
 ### Prerequisites
 - **macOS**: Sonoma 14.0+ or Sequoia 15.0+ (Apple Silicon or Intel)
 - **Homebrew**: `brew install scrcpy android-platform-tools`
-- **Node.js**: 18.0+ (`node -v`)
+- **Node.js**: 20.0+ (`node -v`)
 - **Rust**: 1.80+ (`rustup default stable`)
 
-### Desktop App Installation
+### Desktop Development
 
 1. **Clone the repository**:
    ```bash
-   git clone https://github.com/your-org/idroid.git
+   git clone https://github.com/Being-Glad/Idroid.git
    cd Idroid/desktop
    ```
 
