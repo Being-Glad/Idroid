@@ -77,21 +77,7 @@ object LocationHelper {
             } catch (_: Throwable) {}
         }
 
-        // Method 3: Direct Settings.Secure write (requires WRITE_SECURE_SETTINGS)
-        try {
-            val mode = if (enabled) 3 else 0 // 3 = LOCATION_MODE_HIGH_ACCURACY, 0 = LOCATION_MODE_OFF
-            val success = Settings.Secure.putInt(context.contentResolver, Settings.Secure.LOCATION_MODE, mode)
-            if (success) return true
-        } catch (_: Throwable) {}
-
-        // Method 4: Settings.Secure.setLocationProviderEnabled for providers
-        try {
-            Settings.Secure.setLocationProviderEnabled(context.contentResolver, LocationManager.GPS_PROVIDER, enabled)
-            Settings.Secure.setLocationProviderEnabled(context.contentResolver, LocationManager.NETWORK_PROVIDER, enabled)
-            return true
-        } catch (_: Throwable) {}
-
-        // Method 5: Companion link fallback: if connected to Mac, Mac can trigger over adb daemon
+        // Method 3: Companion link fallback: if connected to Mac, Mac can trigger over adb daemon
         try {
             IdroidService.instance?.sendCommand("toggle_phone_location")
         } catch (_: Throwable) {}

@@ -93,14 +93,14 @@ jobs:
         working-directory: android
         run: ./gradlew testDebugUnitTest
 
-      - name: Build Debug & Release APKs
+      - name: Build Official Release APK
         working-directory: android
-        run: ./gradlew assembleDebug
+        run: ./gradlew assembleRelease
 
       - name: Prepare Android Artifacts
         run: |
           mkdir -p artifacts-android
-          cp android/app/build/outputs/apk/debug/app-debug.apk artifacts-android/Idroid-Companion.apk
+          cp android/app/build/outputs/apk/release/app-release.apk artifacts-android/Idroid-Companion.apk
           ls -lh artifacts-android/
 
       - name: Upload Android Artifact

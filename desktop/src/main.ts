@@ -600,6 +600,8 @@ let pairingPayload: PairingPayload = {
 };
 let pairingQrSvg = '';
 let downloadQrSvg = '';
+const OFFICIAL_APK_DOWNLOAD_URL = 'https://github.com/Being-Glad/Idroid/releases/latest/download/Idroid-Companion.apk';
+const OFFICIAL_RELEASES_PAGE_URL = 'https://github.com/Being-Glad/Idroid/releases/latest';
 let activePairingTab: 'consumer_qr' | 'developer_mode' = 'consumer_qr';
 let isPairingQrLoading = false;
 let isCompanionInstalling = false;
@@ -678,7 +680,7 @@ async function generatePairingQRs(force: boolean = false) {
       }
     }
 
-    if (ipChanged || force || !pairingQrSvg) {
+    if (ipChanged || force || !pairingQrSvg || !downloadQrSvg) {
       const ssidParam = pairingPayload.ssid ? `&ssid=${encodeURIComponent(pairingPayload.ssid)}` : '';
       const pairUri = `idroid://pair?ip=${pairingPayload.ip}&port=${pairingPayload.port}&token=${pairingPayload.token}&name=${encodeURIComponent(pairingPayload.name)}${ssidParam}`;
       console.log('[Idroid Desktop] Generated dynamic pairing QR:', pairUri);
@@ -690,12 +692,12 @@ async function generatePairingQRs(force: boolean = false) {
       });
 
       downloadQrSvg = await QRCode.toString(
-        'https://github.com/idroid/idroid/releases/latest/download/idroid-companion.apk',
+        OFFICIAL_APK_DOWNLOAD_URL,
         {
           type: 'svg',
           margin: 1,
-          color: { dark: '#000000', light: '#ffffff' },
-          width: 76,
+          color: { dark: '#0a0d14', light: '#ffffff' },
+          width: 176,
         }
       );
       render();
@@ -4334,21 +4336,64 @@ function updateLiveTelemetryUI() {
 function renderApkDownloadModal() {
   if (!isApkModalOpen) return '';
   return `
-    <div class="modal-backdrop" id="apk-modal-backdrop" style="position: fixed; inset: 0; background: rgba(0,0,0,0.7); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); z-index: 9999; display: flex; align-items: center; justify-content: center; padding: 20px;">
-      <div class="glass-card" style="width: 100%; max-width: 380px; padding: 28px; background: rgba(18, 18, 22, 0.96); border: 1px solid var(--border-subtle); border-radius: 20px; box-shadow: 0 24px 60px rgba(0,0,0,0.8); text-align: center; position: relative;">
-        <button id="btn-close-apk-modal" style="position: absolute; top: 16px; right: 16px; background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 20px; line-height: 1;">&times;</button>
-        <div style="width: 44px; height: 44px; border-radius: 12px; background: rgba(56,182,255,0.15); color: var(--accent-solar); display: inline-flex; align-items: center; justify-content: center; margin-bottom: 12px;">
-          ${Icons.Download(22, 'currentColor')}
-        </div>
-        <h3 style="font-size: 18px; font-weight: 700; color: #fff; margin: 0 0 6px 0;">Get Idroid for Android</h3>
-        <p style="font-size: 12px; color: var(--text-secondary); margin: 0 0 18px 0; line-height: 1.4;">Scan with your native phone camera to download the APK directly</p>
-        <div style="background: #fff; padding: 12px; border-radius: 16px; display: inline-flex; align-items: center; justify-content: center; margin-bottom: 18px; box-shadow: 0 8px 24px rgba(0,0,0,0.4);">
-          ${downloadQrSvg || ''}
-        </div>
-        <div style="display: flex; gap: 10px; justify-content: center;">
-          <button class="btn-solar" id="btn-copy-apk-url" style="padding: 8px 16px; font-size: 12px;">
-            Copy Download Link
-          </button>
+    <div class="modal-backdrop" id="apk-modal-backdrop" style="position: fixed; inset: 0; background: rgba(5, 7, 12, 0.78); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); z-index: 9999; display: flex; align-items: center; justify-content: center; padding: 24px;">
+      <div class="glass-card" style="width: 100%; max-width: 440px; padding: 0; background: linear-gradient(180deg, rgba(22, 25, 34, 0.94) 0%, rgba(12, 14, 20, 0.98) 100%); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 24px; box-shadow: 0 32px 80px -12px rgba(0, 0, 0, 0.85), 0 0 0 1px rgba(255, 255, 255, 0.05), 0 0 40px -10px rgba(30, 176, 94, 0.25); position: relative; overflow: hidden;">
+        
+        <!-- Top Dual-Tone Ambient Glow Line -->
+        <div style="height: 3px; width: 100%; background: linear-gradient(90deg, #007AFF 0%, #38B6FF 40%, #1EB05E 80%, #4AE38B 100%);"></div>
+
+        <!-- Refined Circular Close Button -->
+        <button id="btn-close-apk-modal" aria-label="Close" style="position: absolute; top: 16px; right: 16px; width: 30px; height: 30px; border-radius: 50%; background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.12); color: var(--text-muted); display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all 0.15s ease;">
+          ${Icons.Close(14, 'currentColor')}
+        </button>
+
+        <div style="padding: 28px 28px 26px 28px; text-align: center;">
+          <!-- Dual-Tone Avatar Badge -->
+          <div style="display: inline-flex; align-items: center; justify-content: center; width: 56px; height: 56px; border-radius: 18px; background: linear-gradient(135deg, rgba(0, 122, 255, 0.14) 0%, rgba(30, 176, 94, 0.2) 100%); border: 1px solid rgba(74, 227, 139, 0.35); box-shadow: 0 8px 24px -4px rgba(30, 176, 94, 0.3); margin-bottom: 14px; color: #4AE38B;">
+            ${Icons.Phone(24, 'currentColor')}
+          </div>
+
+          <!-- Title & Official Release Pill -->
+          <div style="display: flex; align-items: center; justify-content: center; gap: 8px; margin-bottom: 6px;">
+            <h3 style="font-size: 19px; font-weight: 700; color: #ffffff; margin: 0; letter-spacing: -0.02em;">Get Idroid Companion</h3>
+            <span style="font-size: 10.5px; font-weight: 700; text-transform: uppercase; padding: 2px 7px; border-radius: 6px; background: rgba(30, 176, 94, 0.18); border: 1px solid rgba(74, 227, 139, 0.35); color: #4AE38B; letter-spacing: 0.04em;">v1.0.0</span>
+          </div>
+
+          <p style="font-size: 12.5px; color: var(--text-secondary); margin: 0 0 20px 0; line-height: 1.45; max-width: 320px; margin-left: auto; margin-right: auto;">
+            Scan with your Android camera or QR scanner to download the official APK directly.
+          </p>
+
+          <!-- High-Contrast QR Code Card with Viewfinder Frame -->
+          <div style="position: relative; display: inline-block; padding: 14px; background: #ffffff; border-radius: 20px; box-shadow: 0 16px 36px -8px rgba(0, 0, 0, 0.6), 0 0 0 4px rgba(255, 255, 255, 0.15); margin-bottom: 18px;">
+            <div style="width: 176px; height: 176px; display: flex; align-items: center; justify-content: center; overflow: hidden; border-radius: 12px;">
+              ${downloadQrSvg || '<div style="color:#0a0d14; font-size:12px; font-weight:600;">Generating QR...</div>'}
+            </div>
+          </div>
+
+          <!-- Verification Specs Pill -->
+          <div style="display: flex; align-items: center; justify-content: center; gap: 12px; font-size: 11px; color: var(--text-muted); margin-bottom: 22px;">
+            <span style="display: inline-flex; align-items: center; gap: 4px; color: #4AE38B; font-weight: 500;">
+              ${Icons.ShieldCheck(13, '#4AE38B')} Verified Release
+            </span>
+            <span style="width: 3px; height: 3px; border-radius: 50%; background: var(--border-subtle);"></span>
+            <span>APK ~28.4 MB</span>
+            <span style="width: 3px; height: 3px; border-radius: 50%; background: var(--border-subtle);"></span>
+            <span>Android 10+</span>
+          </div>
+
+          <!-- Action Buttons -->
+          <div style="display: flex; gap: 10px; justify-content: center; align-items: center; flex-wrap: wrap;">
+            <button class="btn-solar" id="btn-copy-apk-url" style="display: inline-flex; align-items: center; gap: 7px; padding: 10px 18px; font-size: 12.5px; font-weight: 600; border-radius: 12px; background: linear-gradient(135deg, #007AFF 0%, #0056b3 100%); box-shadow: 0 4px 16px rgba(0, 122, 255, 0.4); border: none; color: #fff; cursor: pointer; transition: all 0.15s ease;">
+              ${Icons.Copy(14, 'currentColor')}
+              <span id="btn-copy-apk-text">Copy Direct APK Link</span>
+            </button>
+
+            <button class="btn-luxury" id="btn-open-apk-github" style="display: inline-flex; align-items: center; gap: 7px; padding: 10px 16px; font-size: 12.5px; font-weight: 600; border-radius: 12px; background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.14); color: var(--text-pure); cursor: pointer; transition: all 0.15s ease;" title="Open GitHub Releases in default browser">
+              ${Icons.Globe(14, 'currentColor')}
+              <span>GitHub Releases</span>
+            </button>
+          </div>
+
         </div>
       </div>
     </div>
@@ -8262,12 +8307,28 @@ function attachEventListeners() {
 
   const btnCopyApkUrl = document.getElementById('btn-copy-apk-url');
   if (btnCopyApkUrl) {
-    btnCopyApkUrl.addEventListener('click', () => {
-      navigator.clipboard.writeText('https://github.com/idroid/idroid/releases/latest');
-      btnCopyApkUrl.innerHTML = 'Copied Link!';
-      setTimeout(() => {
-        btnCopyApkUrl.innerHTML = 'Copy Download Link';
-      }, 1500);
+    btnCopyApkUrl.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(OFFICIAL_APK_DOWNLOAD_URL);
+        const textSpan = document.getElementById('btn-copy-apk-text');
+        if (textSpan) textSpan.textContent = 'Copied to Clipboard!';
+        btnCopyApkUrl.style.background = 'linear-gradient(135deg, #1EB05E 0%, #15803d 100%)';
+        btnCopyApkUrl.style.boxShadow = '0 4px 16px rgba(30, 176, 94, 0.4)';
+        setTimeout(() => {
+          if (textSpan) textSpan.textContent = 'Copy Direct APK Link';
+          btnCopyApkUrl.style.background = 'linear-gradient(135deg, #007AFF 0%, #0056b3 100%)';
+          btnCopyApkUrl.style.boxShadow = '0 4px 16px rgba(0, 122, 255, 0.4)';
+        }, 2000);
+      } catch (err) {
+        console.warn('Clipboard write failed:', err);
+      }
+    });
+  }
+
+  const btnOpenApkGithub = document.getElementById('btn-open-apk-github');
+  if (btnOpenApkGithub) {
+    btnOpenApkGithub.addEventListener('click', () => {
+      window.open(OFFICIAL_RELEASES_PAGE_URL, '_blank');
     });
   }
 

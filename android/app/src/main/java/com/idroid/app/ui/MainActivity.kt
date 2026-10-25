@@ -49,10 +49,7 @@ class MainActivity : ComponentActivity() {
     private fun checkAndRequestPermissions() {
         val permissions = mutableListOf(
             android.Manifest.permission.READ_PHONE_STATE,
-            android.Manifest.permission.READ_CALL_LOG,
-            android.Manifest.permission.WRITE_CALL_LOG,
             android.Manifest.permission.READ_CONTACTS,
-            android.Manifest.permission.WRITE_CONTACTS,
             android.Manifest.permission.CALL_PHONE,
             android.Manifest.permission.MODIFY_AUDIO_SETTINGS
         )
