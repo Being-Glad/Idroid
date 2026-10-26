@@ -41,7 +41,6 @@
         android:label="Idroid"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:extractNativeLibs="true"
         android:theme="@style/Theme.Idroid">
 
         <!-- Main Dashboard Activity -->
