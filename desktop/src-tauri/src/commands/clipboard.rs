@@ -96,7 +96,7 @@ pub fn record_image_entry(image_base64: String, source: &str) {
             source: source.to_string(),
             time: "Just now".into(),
             pinned: false,
-            image_base64: Some(image_base64),
+            image_base64: if image_base64.len() > 300_000 { None } else { Some(image_base64) },
         };
         let insert_idx = guard.iter().position(|s| !s.pinned).unwrap_or(guard.len());
         guard.insert(insert_idx, snippet);

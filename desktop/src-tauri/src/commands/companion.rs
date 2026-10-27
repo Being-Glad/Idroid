@@ -19,6 +19,19 @@ use super::system::{
 
 pub static COMPANION_WRITER: LazyLock<Mutex<Option<std::net::TcpStream>>> = LazyLock::new(|| Mutex::new(None));
 
+pub fn get_companion_safe_clipboard_history() -> Vec<super::types::ClipboardSnippet> {
+    let mut list = get_clipboard_history().unwrap_or_default();
+    list.truncate(25);
+    for item in &mut list {
+        if let Some(img) = &item.image_base64 {
+            if img.len() > 150_000 {
+                item.image_base64 = None;
+            }
+        }
+    }
+    list
+}
+
 pub fn send_companion_message(json_val: &serde_json::Value) -> bool {
     if let Ok(mut guard) = COMPANION_WRITER.lock() {
         if let Some(ref mut stream) = *guard {
@@ -259,7 +272,7 @@ pub fn start_companion_server() {
                                         "bluetooth_connected": mac_bt.is_connected,
                                         "volume": get_mac_volume(),
                                         "brightness": get_mac_brightness(),
-                                        "clipboard_history": get_clipboard_history().unwrap_or_default()
+                                        "clipboard_history": get_companion_safe_clipboard_history()
                                     });
                                     if let Ok(mut w) = COMPANION_WRITER.lock() {
                                         *w = stream.try_clone().ok();
@@ -727,8 +740,9 @@ pub fn start_companion_server() {
                                         if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(img_b64) {
                                             crate::commands::clipboard::set_mac_clipboard_image(&bytes);
                                             crate::commands::clipboard::record_image_entry(img_b64.to_string(), "Android Phone (Image)");
-                                            let hist = get_clipboard_history().unwrap_or_default();
-                                            super::emit_to_windows("clipboard_history_updated", serde_json::to_value(&hist).unwrap_or_default());
+                                            let full_hist = get_clipboard_history().unwrap_or_default();
+                                            super::emit_to_windows("clipboard_history_updated", serde_json::to_value(&full_hist).unwrap_or_default());
+                                            let hist = get_companion_safe_clipboard_history();
                                             let resp = serde_json::json!({
                                                 "type": "clipboard_history",
                                                 "history": hist,
@@ -744,7 +758,7 @@ pub fn start_companion_server() {
                                             }
                                         }
                                         record_clipboard_entry(text.to_string(), "Android Phone");
-                                        let hist = get_clipboard_history().unwrap_or_default();
+                                        let hist = get_companion_safe_clipboard_history();
                                         let resp = serde_json::json!({
                                             "type": "clipboard_history",
                                             "history": hist,
@@ -758,7 +772,7 @@ pub fn start_companion_server() {
                                     if let Some(id) = val.get("id").and_then(|i| i.as_str()) {
                                         let _ = toggle_pin_clipboard(id.to_string());
                                     }
-                                    let hist = get_clipboard_history().unwrap_or_default();
+                                    let hist = get_companion_safe_clipboard_history();
                                     let resp = serde_json::json!({
                                         "type": "clipboard_history",
                                         "history": hist,
@@ -771,7 +785,7 @@ pub fn start_companion_server() {
                                     if let Some(id) = val.get("id").and_then(|i| i.as_str()) {
                                         let _ = delete_clipboard_entry(id.to_string());
                                     }
-                                    let hist = get_clipboard_history().unwrap_or_default();
+                                    let hist = get_companion_safe_clipboard_history();
                                     let resp = serde_json::json!({
                                         "type": "clipboard_history",
                                         "history": hist,
@@ -782,7 +796,7 @@ pub fn start_companion_server() {
                                 }
                                 "clear_clipboard_history" => {
                                     let _ = clear_clipboard_history();
-                                    let hist = get_clipboard_history().unwrap_or_default();
+                                    let hist = get_companion_safe_clipboard_history();
                                     let resp = serde_json::json!({
                                         "type": "clipboard_history",
                                         "history": hist,
@@ -792,7 +806,7 @@ pub fn start_companion_server() {
                                     let _ = stream.flush();
                                 }
                                 "get_clipboard_history" => {
-                                    let hist = get_clipboard_history().unwrap_or_default();
+                                    let hist = get_companion_safe_clipboard_history();
                                     let resp = serde_json::json!({
                                         "type": "clipboard_history",
                                         "history": hist,
@@ -808,7 +822,7 @@ pub fn start_companion_server() {
                                     let user_name = get_mac_user_name();
                                     let conn_mode = get_active_connection_mode();
                                     let all_apps = get_installed_mac_apps();
-                                    let hist = get_clipboard_history().unwrap_or_default();
+                                    let hist = get_companion_safe_clipboard_history();
                                     let resp = serde_json::json!({
                                         "type": "mac_status",
                                         "name": mac_name,

@@ -127,20 +127,26 @@ class TcpClient(
                         onConnectionStateChanged(true)
                         startHeartbeat()
 
-                        // Read loop
+                        // Read loop with bounded line buffer to prevent OOM
                         while (isRunning.get() && !newSocket.isClosed) {
-                            val line = reader?.readLine() ?: break
+                            val r = reader ?: break
+                            val line = readLineBounded(r) ?: break
                             if (line.isNotBlank()) {
-                                android.util.Log.d("IdroidTcp", "Received: $line")
+                                android.util.Log.d("IdroidTcp", "Received: ${line.take(200)}")
                                 onMessageReceived(line)
                             }
                         }
                         break // Done with read loop
-                    } catch (e: Exception) {
-                        if (targetHost == host) {
-                            primaryErr = e
+                    } catch (e: Throwable) {
+                        if (e is OutOfMemoryError) {
+                            android.util.Log.e("IdroidTcp", "Caught OutOfMemoryError in TCP read loop, recovering safely: ${e.message}")
+                            System.gc()
                         }
-                        lastErr = e
+                        val ex = if (e is Exception) e else Exception(e.message)
+                        if (targetHost == host) {
+                            primaryErr = ex
+                        }
+                        lastErr = ex
                         cleanupSocket()
                     }
                 }
@@ -190,6 +196,35 @@ class TcpClient(
                 writer?.flush()
             } catch (e: Exception) {
                 android.util.Log.e("IdroidTcp", "Error sending message: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * Reads a line with an explicit memory ceiling (default 4MB) to safeguard the Android VM
+     * against OutOfMemoryError crashes from oversized messages or missing newlines.
+     */
+    private fun readLineBounded(reader: BufferedReader, maxChars: Int = 4 * 1024 * 1024): String? {
+        val sb = StringBuilder(2048)
+        var dropped = false
+        while (true) {
+            val ch = reader.read()
+            if (ch == -1) {
+                return if (sb.isEmpty() || dropped) null else sb.toString()
+            }
+            if (ch == '\n'.code) {
+                return if (dropped) null else sb.toString()
+            }
+            if (ch != '\r'.code) {
+                if (!dropped) {
+                    if (sb.length < maxChars) {
+                        sb.append(ch.toChar())
+                    } else {
+                        android.util.Log.w("IdroidTcp", "TCP line exceeded safe limit of $maxChars chars; dropping remainder to prevent OOM")
+                        dropped = true
+                        sb.setLength(0)
+                    }
+                }
             }
         }
     }

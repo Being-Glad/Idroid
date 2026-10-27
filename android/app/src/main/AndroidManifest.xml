@@ -37,6 +37,7 @@
     <application
         android:name=".IdroidApplication"
         android:allowBackup="true"
+        android:largeHeap="true"
         android:icon="@mipmap/ic_launcher"
         android:label="Idroid"
         android:roundIcon="@mipmap/ic_launcher_round"
