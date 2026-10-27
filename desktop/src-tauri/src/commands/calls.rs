@@ -658,3 +658,63 @@ pub fn extract_content_field(line: &str, field: &str) -> Option<String> {
         None
     }
 }
+
+#[tauri::command]
+pub fn sync_call_overlay(app: tauri::AppHandle, visible: bool) -> Result<(), String> {
+    use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+
+    if !visible {
+        if let Some(win) = app.get_webview_window("call-overlay") {
+            let _ = win.hide();
+        }
+        return Ok(());
+    }
+
+    if let Some(win) = app.get_webview_window("call-overlay") {
+        let _ = win.show();
+        let _ = win.set_always_on_top(true);
+    } else {
+        let overlay_w = 340.0;
+        let overlay_h = 280.0;
+
+        let (pos_x, pos_y) = if let Ok(Some(monitor)) = app.primary_monitor() {
+            let size = monitor.size();
+            let scale = monitor.scale_factor();
+            let screen_w = size.width as f64 / scale;
+            (screen_w - overlay_w - 40.0, 60.0)
+        } else {
+            (100.0, 100.0)
+        };
+
+        let win = WebviewWindowBuilder::new(
+            &app,
+            "call-overlay",
+            WebviewUrl::App("call.html".into()),
+        )
+        .title("Idroid Call Overlay")
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .inner_size(overlay_w, overlay_h)
+        .position(pos_x, pos_y)
+        .resizable(false)
+        .skip_taskbar(true)
+        .shadow(false)
+        .build()
+        .map_err(|e| format!("Failed to create call overlay: {}", e))?;
+
+        let _ = win.show();
+        let _ = win.set_always_on_top(true);
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn resize_call_overlay(app: tauri::AppHandle, width: f64, height: f64) -> Result<(), String> {
+    use tauri::Manager;
+    if let Some(win) = app.get_webview_window("call-overlay") {
+        let _ = win.set_size(tauri::Size::Logical(tauri::LogicalSize::new(width, height)));
+    }
+    Ok(())
+}

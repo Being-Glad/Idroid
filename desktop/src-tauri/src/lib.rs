@@ -109,6 +109,8 @@ pub fn run() {
       commands::set_call_audio_route,
       commands::check_incoming_call,
       commands::get_call_state,
+      commands::sync_call_overlay,
+      commands::resize_call_overlay,
       commands::toggle_call_mute,
       commands::record_call_audio,
       commands::get_call_history,

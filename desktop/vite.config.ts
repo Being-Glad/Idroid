@@ -15,6 +15,7 @@ export default defineConfig({
       input: {
         main: resolve(__dirname, 'index.html'),
         dock: resolve(__dirname, 'dock.html'),
+        call: resolve(__dirname, 'call.html'),
       },
     },
   },

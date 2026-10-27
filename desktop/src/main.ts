@@ -2348,119 +2348,11 @@ function renderContactsDirectoryModal(): string {
 
 // MARK: - Floating Apple Continuity Style In-Call HUD
 function renderFloatingCallHUD(): string {
-  if (!isCallActive || device.status !== 'Connected') return '';
-
-  const mins = Math.floor(callDurationSec / 60)
-    .toString()
-    .padStart(2, '0');
-  const secs = (callDurationSec % 60).toString().padStart(2, '0');
-  const timerStr = `${mins}:${secs}`;
-  const displayName = activeCallTargetName || activeCallTarget || 'Connected Call';
-  const initial = displayName.substring(0, 1).toUpperCase();
-
-  return `
-    <div class="floating-call-hud" id="floating-call-hud">
-      <div class="hud-caller-header">
-        <div class="hud-avatar-wrapper">
-          <div class="hud-avatar-circle">
-            ${initial}
-          </div>
-          <div class="hud-avatar-pulse"></div>
-        </div>
-
-        <div class="hud-caller-info">
-          <div class="hud-caller-name" title="${displayName}">${displayName}</div>
-          <div class="hud-caller-sub">
-            <span class="status-pulse-dot"></span>
-            <span>Call Connected</span>
-            <span>•</span>
-            <span class="hud-timer-badge" id="hud-call-timer">${timerStr}</span>
-          </div>
-        </div>
-      </div>
-
-      <!-- Apple Continuity Audio Route Segmented Control -->
-      <div style="display: flex; flex-direction: column; gap: 6px;">
-        <div class="call-hud-route-segmented">
-          <button class="call-route-pill ${callAudioRoute === 'mac' || callAudioRoute === 'phone_speaker' ? 'active' : ''}" id="btn-hud-route-speaker" title="Hands-Free Loudspeaker & High-Gain Desk Mic">
-            ${Icons.Volume2(13, 'currentColor')} <span>Hands-Free</span>
-          </button>
-          <button class="call-route-pill ${callAudioRoute === 'phone' ? 'active' : ''}" id="btn-hud-route-phone" title="Switch to Private Handset (Earpiece)">
-            ${Icons.Phone(13, 'currentColor')} <span>Private</span>
-          </button>
-          <button class="call-route-pill ${callAudioRoute === 'bluetooth' ? 'active' : ''}" id="btn-hud-route-bt" title="Route to Connected Bluetooth Headset">
-            ${Icons.Bluetooth(13, 'currentColor')} <span>Headset</span>
-          </button>
-        </div>
-        <div style="font-size: 10px; color: #10b981; background: rgba(16,185,129,0.08); border: 1px solid rgba(16,185,129,0.25); padding: 5px 10px; border-radius: 8px; display: flex; align-items: center; justify-content: space-between; gap: 6px;">
-          <span>${callAudioRoute === 'phone' ? '📱 Private earpiece active' : callAudioRoute === 'bluetooth' ? '🎧 Bluetooth headset active' : '🔊 Hands-Free Loudspeaker & Mic active • Media paused'}</span>
-          <span style="font-size: 9px; opacity: 0.8; color: #fff;">1-Click Switch</span>
-        </div>
-      </div>
-
-      <!-- In-Call Actions: Mute, Keypad, Conference, End -->
-      <div class="hud-controls-grid">
-        <!-- Mute / Unmute -->
-        <div class="hud-action-col">
-          <button class="hud-ctrl-btn ${isCallMuted ? 'active' : ''}" id="btn-hud-mute" title="${isCallMuted ? 'Unmute Microphone' : 'Mute Microphone'}">
-            ${isCallMuted ? Icons.MicOff(18, isCallMuted ? '#111' : '#fff') : Icons.Mic(18, '#fff')}
-          </button>
-          <span class="hud-btn-label">${isCallMuted ? 'Muted' : 'Mute'}</span>
-        </div>
-
-        <!-- Keypad / DTMF -->
-        <div class="hud-action-col">
-          <button class="hud-ctrl-btn" id="btn-hud-keypad" title="Open Keypad">
-            ${Icons.Keypad(18, '#fff')}
-          </button>
-          <span class="hud-btn-label">Keypad</span>
-        </div>
-
-        <!-- Add Person / Conference -->
-        <div class="hud-action-col">
-          <button class="hud-ctrl-btn ${isAddPersonModalOpen ? 'active' : ''}" id="btn-hud-add-person" title="Add Participant">
-            ${Icons.Users(18, '#fff')}
-          </button>
-          <span class="hud-btn-label">Add</span>
-        </div>
-
-        <!-- End Call (Crimson) -->
-        <div class="hud-action-col">
-          <button class="hud-ctrl-btn end" id="btn-hud-end-call" title="End Call">
-            ${Icons.PhoneOff(19, '#fff')}
-          </button>
-          <span class="hud-btn-label" style="color: #ef4444; font-weight: 600;">End</span>
-        </div>
-      </div>
-
-      ${
-        isAddPersonModalOpen
-          ? `
-        <div class="hud-conference-bar">
-          <div style="font-size: 11px; font-weight: 600; color: #fff; display: flex; justify-content: space-between; align-items: center;">
-            <span>Add Participant to Call</span>
-            <button id="btn-hud-cancel-conference" style="background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 13px;">✕</button>
-          </div>
-          <div style="display: flex; gap: 6px; margin-top: 4px;">
-            <input type="text" id="input-hud-conference-number" placeholder="Enter number..." style="flex: 1; background: rgba(255,255,255,0.06); border: 1px solid var(--border-subtle); border-radius: 8px; color: #fff; padding: 4px 8px; font-size: 11.5px; outline: none;" />
-            <button class="btn-solar" id="btn-hud-dial-conference" style="padding: 4px 10px; font-size: 11px;">Add</button>
-          </div>
-          ${
-            conferenceParticipants.length > 0
-              ? `
-            <div style="font-size: 10.5px; color: var(--text-secondary); margin-top: 2px;">
-              In Conference: ${conferenceParticipants.join(', ')}
-            </div>
-          `
-              : ''
-          }
-        </div>
-      `
-          : ''
-      }
-    </div>
-  `;
+  // Active call HUD is seamlessly rendered in dedicated draggable floating One UI call window outside the app
+  return '';
 }
+
+
 
 // MARK: - Incoming Call Alert Banner
 function renderIncomingCallBanner(): string {
@@ -2879,6 +2771,7 @@ async function pollCallStateSync() {
         activeCallTargetName = targetName;
         isCallActive = true;
         callDurationSec = 0;
+        invoke('sync_call_overlay', { visible: true });
         if (callDurationTimer) clearInterval(callDurationTimer);
         callDurationTimer = setInterval(() => {
           callDurationSec++;
@@ -2904,6 +2797,7 @@ async function pollCallStateSync() {
       activeCallTargetName = matched?.name || (callState.name || activeCallTarget);
       isCallActive = true;
       callDurationSec = 0;
+      invoke('sync_call_overlay', { visible: true });
       if (callDurationTimer) clearInterval(callDurationTimer);
       callDurationTimer = setInterval(() => {
         callDurationSec++;
@@ -2960,6 +2854,9 @@ function triggerCallEndedTransientBanner() {
 
 function handleRemoteCallEnded() {
   const wasActive = (isCallActive || Boolean(incomingCall)) && device.status === 'Connected';
+  getInvoke().then((inv) => {
+    if (inv) inv('sync_call_overlay', { visible: false });
+  });
   incomingCall = null;
   isCallActive = false;
   isCallMuted = false;
@@ -4063,6 +3960,7 @@ async function handleStartCall(targetNumber?: string) {
   const invoke = await getInvoke();
   if (invoke) {
     try {
+      await invoke('sync_call_overlay', { visible: true });
       await invoke('make_phone_call', { number: activeCallTarget });
       await invoke('set_call_audio_route', { route: callAudioRoute });
     } catch (err: any) {
@@ -4133,6 +4031,7 @@ async function handleAcceptIncomingCall(number?: string, name?: string) {
   const invoke = await getInvoke();
   if (invoke) {
     try {
+      await invoke('sync_call_overlay', { visible: true });
       await invoke('answer_phone_call');
       await invoke('set_call_audio_route', { route: 'mac' });
     } catch (e) {
@@ -4254,6 +4153,7 @@ async function handleEndCall() {
   if (invoke) {
     try {
       await invoke('end_phone_call');
+      await invoke('sync_call_overlay', { visible: false });
     } catch (e) {
       console.error(e);
     }
@@ -8856,6 +8756,9 @@ async function setupRealtimeCallListeners() {
           activeCallTargetName = targetName;
           isCallActive = true;
           callDurationSec = 0;
+          getInvoke().then((inv) => {
+            if (inv) inv('sync_call_overlay', { visible: true });
+          });
           if (callDurationTimer) clearInterval(callDurationTimer);
           callDurationTimer = setInterval(() => {
             callDurationSec++;
