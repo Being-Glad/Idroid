@@ -58,6 +58,9 @@ export interface CallStateInfo {
   is_active: boolean;
   number: string;
   name: string;
+  duration_sec?: number;
+  audio_route?: 'mac' | 'phone_speaker' | 'phone' | 'bluetooth';
+  audio_route_name?: string;
 }
 
 export interface CallRecord {

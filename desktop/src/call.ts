@@ -9,12 +9,16 @@ interface CallStateInfo {
   is_active: boolean;
   number: string;
   name: string;
+  duration_sec?: number;
+  audio_route?: string;
+  audio_route_name?: string;
 }
 
 let isCollapsed = false;
-let callerName = 'Om\'s S23 Ultra';
+let callerName = 'Ongoing Call';
 let callerNumber = '';
 let audioRoute = 'phone_speaker'; // 'mac' | 'phone_speaker' | 'phone' | 'bluetooth'
+let audioRouteName = '';
 let durationSec = 0;
 let isMuted = false;
 let durationTimer: any = null;
@@ -103,6 +107,7 @@ function render() {
           </div>
           <div class="caller-info">
             <div class="caller-name" title="${callerName}">${callerName}</div>
+            ${callerNumber && callerNumber !== callerName ? `<div style="font-size: 11px; color: #94a3b8; font-family: monospace; margin-top: 1px;">${callerNumber}</div>` : ''}
             <div class="caller-sub">
               <span class="status-dot"></span>
               <span>Connected</span>
@@ -121,12 +126,18 @@ function render() {
             <button class="route-pill ${audioRoute === 'phone' ? 'active' : ''}" id="btn-route-phone" title="Private Handset (Earpiece)">
               ${Icons.Phone(13, 'currentColor')} <span>Private</span>
             </button>
-            <button class="route-pill ${audioRoute === 'bluetooth' ? 'active' : ''}" id="btn-route-bt" title="Connected Bluetooth Headset">
+            <button class="route-pill ${audioRoute === 'bluetooth' ? 'active' : ''}" id="btn-route-bt" title="Connected Bluetooth Headset (${audioRouteName || 'Bluetooth'})">
               ${Icons.Bluetooth(13, 'currentColor')} <span>Headset</span>
             </button>
           </div>
           <div class="route-status-note">
-            <span>${audioRoute === 'phone' ? '📱 Private earpiece active' : audioRoute === 'bluetooth' ? '🎧 Bluetooth headset active' : '🔊 Hands-Free Loudspeaker active'}</span>
+            <span>${
+              audioRoute === 'phone'
+                ? '📱 Private earpiece active'
+                : audioRoute === 'bluetooth'
+                  ? `🎧 ${audioRouteName || 'Bluetooth headset'} active`
+                  : '🔊 Hands-Free Loudspeaker active'
+            }</span>
             <span style="font-size: 9px; opacity: 0.8; color: #fff;">1-Click Switch</span>
           </div>
         </div>
@@ -226,6 +237,33 @@ function render() {
   }
 }
 
+function applyState(state: CallStateInfo) {
+  if (state.state === 'idle') {
+    invoke('sync_call_overlay', { visible: false });
+    return;
+  }
+  if (state.name && state.name.trim().length > 0) {
+    callerName = state.name;
+  } else if (state.number && state.number.trim().length > 0) {
+    callerName = state.number;
+  }
+  if (state.number) {
+    callerNumber = state.number;
+  }
+  if (state.duration_sec != null && state.duration_sec > 0) {
+    if (Math.abs(durationSec - state.duration_sec) > 1) {
+      durationSec = state.duration_sec;
+    }
+  }
+  if (state.audio_route) {
+    audioRoute = state.audio_route;
+  }
+  if (state.audio_route_name) {
+    audioRouteName = state.audio_route_name;
+  }
+  render();
+}
+
 async function init() {
   render();
 
@@ -238,17 +276,11 @@ async function init() {
     }
   }, 1000);
 
-  // Sync state from daemon
+  // Sync initial state from daemon
   try {
     const state: any = await invoke('get_call_state');
     if (state) {
-      if (state.state === 'idle') {
-        invoke('sync_call_overlay', { visible: false });
-        return;
-      }
-      callerName = state.name || state.number || callerName;
-      callerNumber = state.number || '';
-      render();
+      applyState(state);
     }
   } catch (_) {}
 
@@ -257,22 +289,27 @@ async function init() {
     await listen('call_state_changed', (event: any) => {
       const state = event.payload as CallStateInfo;
       if (!state) return;
-      if (state.state === 'idle') {
-        invoke('sync_call_overlay', { visible: false });
-      } else {
-        callerName = state.name || state.number || callerName;
-        callerNumber = state.number || '';
-        render();
-      }
+      applyState(state);
     });
   } catch (_) {}
 
-  // Periodic poll to ensure quick auto-dismiss when call ends on phone
+  // Periodic poll to ensure quick auto-dismiss and sync
   setInterval(async () => {
     try {
       const state: any = await invoke('get_call_state');
-      if (state && state.state === 'idle') {
-        invoke('sync_call_overlay', { visible: false });
+      if (state) {
+        if (state.state === 'idle') {
+          invoke('sync_call_overlay', { visible: false });
+        } else if (state.state === 'active') {
+          if (state.duration_sec && Math.abs(durationSec - state.duration_sec) > 2) {
+            durationSec = state.duration_sec;
+          }
+          if (state.audio_route && state.audio_route !== audioRoute) {
+            audioRoute = state.audio_route;
+            audioRouteName = state.audio_route_name || audioRouteName;
+            render();
+          }
+        }
       }
     } catch (_) {}
   }, 1500);

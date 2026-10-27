@@ -166,6 +166,9 @@ pub fn get_call_state() -> Result<CallStateInfo, String> {
                 is_active: false,
                 number: String::new(),
                 name: String::new(),
+                duration_sec: 0,
+                audio_route: None,
+                audio_route_name: None,
             };
         }
         return Ok(CallStateInfo {
@@ -174,6 +177,9 @@ pub fn get_call_state() -> Result<CallStateInfo, String> {
             is_active: false,
             number: String::new(),
             name: String::new(),
+            duration_sec: 0,
+            audio_route: None,
+            audio_route_name: None,
         });
     }
 
@@ -183,6 +189,9 @@ pub fn get_call_state() -> Result<CallStateInfo, String> {
         is_active: false,
         number: String::new(),
         name: String::new(),
+        duration_sec: 0,
+        audio_route: None,
+        audio_route_name: None,
     });
 
     let output = adb_command(&["shell", "dumpsys", "telephony.registry"]).output();
@@ -245,6 +254,9 @@ pub fn get_call_state() -> Result<CallStateInfo, String> {
 
     let mut final_number = detected_number;
     let mut final_name = String::new();
+    let mut final_duration = current_cached.duration_sec;
+    let mut final_route = current_cached.audio_route.clone();
+    let mut final_route_name = current_cached.audio_route_name.clone();
 
     if let Ok(mut guard) = CURRENT_CALL_STATE.lock() {
         guard.state = final_state.clone();
@@ -253,26 +265,39 @@ pub fn get_call_state() -> Result<CallStateInfo, String> {
         if final_state == "idle" {
             guard.number = String::new();
             guard.name = String::new();
-        } else if !final_number.is_empty() {
-            guard.number = final_number.clone();
-        } else if !guard.number.is_empty() {
-            final_number = guard.number.clone();
-        }
+            guard.duration_sec = 0;
+            guard.audio_route = None;
+            guard.audio_route_name = None;
+            final_duration = 0;
+            final_route = None;
+            final_route_name = None;
+        } else {
+            if !final_number.is_empty() {
+                guard.number = final_number.clone();
+            } else if !guard.number.is_empty() {
+                final_number = guard.number.clone();
+            }
 
-        // Try to resolve name from contacts cache
-        if !final_number.is_empty() {
-            if let Ok(contacts) = PHONE_CONTACTS_CACHE.lock() {
-                let clean_final = final_number.chars().filter(|c| c.is_ascii_digit()).collect::<String>();
-                for c in contacts.iter() {
-                    let clean_c = c.number.chars().filter(|ch| ch.is_ascii_digit()).collect::<String>();
-                    if !clean_final.is_empty() && !clean_c.is_empty() && (clean_c.ends_with(&clean_final) || clean_final.ends_with(&clean_c)) {
-                        final_name = c.name.clone();
-                        break;
+            if guard.name.is_empty() && !final_number.is_empty() {
+                if let Ok(contacts) = PHONE_CONTACTS_CACHE.lock() {
+                    let clean_final = final_number.chars().filter(|c| c.is_ascii_digit()).collect::<String>();
+                    for c in contacts.iter() {
+                        let clean_c = c.number.chars().filter(|ch| ch.is_ascii_digit()).collect::<String>();
+                        if !clean_final.is_empty() && !clean_c.is_empty() && (clean_c.ends_with(&clean_final) || clean_final.ends_with(&clean_c)) {
+                            final_name = c.name.clone();
+                            break;
+                        }
                     }
                 }
+                guard.name = final_name.clone();
+            } else {
+                final_name = guard.name.clone();
             }
+
+            final_duration = guard.duration_sec;
+            final_route = guard.audio_route.clone();
+            final_route_name = guard.audio_route_name.clone();
         }
-        guard.name = final_name.clone();
     }
 
     Ok(CallStateInfo {
@@ -281,6 +306,9 @@ pub fn get_call_state() -> Result<CallStateInfo, String> {
         is_active: final_state == "active",
         number: final_number,
         name: final_name,
+        duration_sec: final_duration,
+        audio_route: final_route,
+        audio_route_name: final_route_name,
     })
 }
 

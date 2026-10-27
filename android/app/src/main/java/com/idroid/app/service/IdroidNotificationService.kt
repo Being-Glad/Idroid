@@ -69,8 +69,33 @@ class IdroidNotificationService : NotificationListenerService() {
         }
     }
 
+    private fun isCallNotification(sbn: StatusBarNotification?): Boolean {
+        if (sbn == null) return false
+        val pkg = sbn.packageName ?: ""
+        val cat = sbn.notification?.category
+        return pkg == "com.samsung.android.incallui" ||
+                pkg == "com.google.android.dialer" ||
+                pkg == "com.samsung.android.dialer" ||
+                pkg == "com.android.phone" ||
+                pkg == "com.android.server.telecom" ||
+                cat == android.app.Notification.CATEGORY_CALL
+    }
+
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
         super.onNotificationPosted(sbn)
+        if (sbn == null) return
+
+        if (isCallNotification(sbn)) {
+            val extras = sbn.notification.extras
+            val title = extras?.getCharSequence(android.app.Notification.EXTRA_TITLE)?.toString()
+                ?: extras?.getCharSequence("android.title")?.toString() ?: ""
+            val text = extras?.getCharSequence(android.app.Notification.EXTRA_TEXT)?.toString()
+                ?: extras?.getCharSequence("android.text")?.toString() ?: ""
+            val whenMs = sbn.notification.`when`
+            IdroidService.instance?.updateActiveCallFromNotification(title, text, whenMs)
+            return
+        }
+
         guardValidNotification(sbn) { notification ->
             val message = IdroidMessage(
                 type = "notification_posted",
@@ -83,7 +108,14 @@ class IdroidNotificationService : NotificationListenerService() {
 
     override fun onNotificationRemoved(sbn: StatusBarNotification?) {
         super.onNotificationRemoved(sbn)
-        val id = sbn?.key ?: sbn?.id?.toString() ?: return
+        if (sbn == null) return
+
+        if (isCallNotification(sbn)) {
+            IdroidService.instance?.onCallNotificationRemoved()
+            return
+        }
+
+        val id = sbn.key ?: sbn.id.toString()
         val message = IdroidMessage(
             type = "notification_removed",
             payload = mapOf("notificationId" to id)

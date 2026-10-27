@@ -2788,26 +2788,45 @@ async function pollCallStateSync() {
         incomingCall = null;
         render();
       }
-    } else if (callState.state === 'active' && !isCallActive && !incomingCall) {
-      // Outgoing or active call initiated on phone directly!
-      activeCallTarget = callState.number || 'Ongoing Call';
-      const cleanNum = activeCallTarget.replace(/[\s-]/g, '');
+    } else if (callState.state === 'active') {
+      const rawNum = callState.number || '';
+      const cleanNum = rawNum.replace(/[\s-]/g, '');
       const matched = favouriteContacts.find(c => c.number.replace(/[\s-]/g, '') === cleanNum) ||
                       phoneContacts.find(c => c.number.replace(/[\s-]/g, '') === cleanNum);
-      activeCallTargetName = matched?.name || (callState.name || activeCallTarget);
-      isCallActive = true;
-      callDurationSec = 0;
-      invoke('sync_call_overlay', { visible: true });
-      if (callDurationTimer) clearInterval(callDurationTimer);
-      callDurationTimer = setInterval(() => {
-        callDurationSec++;
-        const timerEl = document.getElementById('hud-call-timer') || document.getElementById('active-call-timer');
-        if (timerEl) {
-          const mins = Math.floor(callDurationSec / 60).toString().padStart(2, '0');
-          const secs = (callDurationSec % 60).toString().padStart(2, '0');
-          timerEl.textContent = `${mins}:${secs}`;
+      if (callState.name) {
+        activeCallTargetName = callState.name;
+      } else if (matched?.name) {
+        activeCallTargetName = matched.name;
+      } else if (rawNum) {
+        activeCallTargetName = rawNum;
+      } else if (!activeCallTargetName) {
+        activeCallTargetName = 'Ongoing Call';
+      }
+      activeCallTarget = rawNum || activeCallTargetName;
+
+      if (callState.audio_route) {
+        callAudioRoute = callState.audio_route;
+      }
+      if (callState.duration_sec != null && callState.duration_sec > 0) {
+        if (Math.abs(callDurationSec - callState.duration_sec) > 1) {
+          callDurationSec = callState.duration_sec;
         }
-      }, 1000);
+      }
+
+      if (!isCallActive && !incomingCall) {
+        isCallActive = true;
+        invoke('sync_call_overlay', { visible: true });
+        if (callDurationTimer) clearInterval(callDurationTimer);
+        callDurationTimer = setInterval(() => {
+          callDurationSec++;
+          const timerEl = document.getElementById('hud-call-timer') || document.getElementById('active-call-timer');
+          if (timerEl) {
+            const mins = Math.floor(callDurationSec / 60).toString().padStart(2, '0');
+            const secs = (callDurationSec % 60).toString().padStart(2, '0');
+            timerEl.textContent = `${mins}:${secs}`;
+          }
+        }, 1000);
+      }
       render();
     }
   } catch (_) {}
@@ -8755,7 +8774,10 @@ async function setupRealtimeCallListeners() {
           activeCallTarget = targetNum;
           activeCallTargetName = targetName;
           isCallActive = true;
-          callDurationSec = 0;
+          callDurationSec = callState.duration_sec || 0;
+          if (callState.audio_route) {
+            callAudioRoute = callState.audio_route;
+          }
           getInvoke().then((inv) => {
             if (inv) inv('sync_call_overlay', { visible: true });
           });
@@ -8774,6 +8796,48 @@ async function setupRealtimeCallListeners() {
           incomingCall = null;
           render();
         }
+      } else if (callState.state === 'active') {
+        const rawNum = callState.number || '';
+        const cleanNum = rawNum.replace(/[\s-]/g, '');
+        const matched = favouriteContacts.find(c => c.number.replace(/[\s-]/g, '') === cleanNum) ||
+                        phoneContacts.find(c => c.number.replace(/[\s-]/g, '') === cleanNum);
+        if (callState.name) {
+          activeCallTargetName = callState.name;
+        } else if (matched?.name) {
+          activeCallTargetName = matched.name;
+        } else if (rawNum) {
+          activeCallTargetName = rawNum;
+        } else if (!activeCallTargetName) {
+          activeCallTargetName = 'Ongoing Call';
+        }
+        activeCallTarget = rawNum || activeCallTargetName;
+
+        if (callState.audio_route) {
+          callAudioRoute = callState.audio_route;
+        }
+        if (callState.duration_sec != null && callState.duration_sec > 0) {
+          if (Math.abs(callDurationSec - callState.duration_sec) > 1) {
+            callDurationSec = callState.duration_sec;
+          }
+        }
+
+        if (!isCallActive) {
+          isCallActive = true;
+          getInvoke().then((inv) => {
+            if (inv) inv('sync_call_overlay', { visible: true });
+          });
+          if (callDurationTimer) clearInterval(callDurationTimer);
+          callDurationTimer = setInterval(() => {
+            callDurationSec++;
+            const timerEl = document.getElementById('hud-call-timer') || document.getElementById('active-call-timer');
+            if (timerEl) {
+              const mins = Math.floor(callDurationSec / 60).toString().padStart(2, '0');
+              const secs = (callDurationSec % 60).toString().padStart(2, '0');
+              timerEl.textContent = `${mins}:${secs}`;
+            }
+          }, 1000);
+        }
+        render();
       }
     });
 

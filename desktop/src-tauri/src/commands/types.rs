@@ -13,6 +13,9 @@ pub static CURRENT_CALL_STATE: LazyLock<Mutex<CallStateInfo>> = LazyLock::new(||
     is_active: false,
     number: String::new(),
     name: String::new(),
+    duration_sec: 0,
+    audio_route: None,
+    audio_route_name: None,
 }));
 pub static PHONE_CONTACTS_CACHE: LazyLock<Mutex<Vec<PhoneContact>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 pub static PHONE_CALL_HISTORY_CACHE: LazyLock<Mutex<Vec<CallRecord>>> = LazyLock::new(|| Mutex::new(Vec::new()));
@@ -229,6 +232,12 @@ pub struct CallStateInfo {
     pub is_active: bool,
     pub number: String,
     pub name: String,
+    #[serde(default)]
+    pub duration_sec: u64,
+    #[serde(default)]
+    pub audio_route: Option<String>,
+    #[serde(default)]
+    pub audio_route_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

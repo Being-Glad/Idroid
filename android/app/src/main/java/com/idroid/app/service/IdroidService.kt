@@ -978,6 +978,140 @@ class IdroidService : Service() {
         }
     }
 
+    private var currentCallState = "idle"
+    private var currentCallNumber = ""
+    private var currentCallName = ""
+    private var currentCallStartTimeMs = 0L
+    private var callDurationSyncRunnable: Runnable? = null
+    private val callSyncHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
+    fun getCurrentAudioRouteInfo(): Pair<String, String> {
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+            ?: return Pair("phone", "Handset Earpiece")
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val commDevice = audioManager.communicationDevice
+            if (commDevice != null) {
+                val name = commDevice.productName?.toString()?.trim() ?: ""
+                when (commDevice.type) {
+                    AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+                    AudioDeviceInfo.TYPE_BLE_HEADSET,
+                    AudioDeviceInfo.TYPE_BLUETOOTH_A2DP -> {
+                        return Pair("bluetooth", if (name.isNotBlank()) name else "Bluetooth Headset")
+                    }
+                    AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> {
+                        return Pair("phone_speaker", "Hands-Free Speaker")
+                    }
+                    AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> {
+                        return Pair("phone", "Handset Earpiece")
+                    }
+                }
+            }
+        }
+
+        if (audioManager.isSpeakerphoneOn) {
+            return Pair("phone_speaker", "Hands-Free Speaker")
+        }
+
+        val btStatus = com.idroid.app.utils.BluetoothHelper.getStatus(this)
+        if (btStatus.isConnected && !btStatus.connectedDeviceName.isNullOrBlank()) {
+            return Pair("bluetooth", btStatus.connectedDeviceName)
+        }
+
+        return Pair("phone", "Handset Earpiece")
+    }
+
+    fun updateActiveCallFromNotification(title: String, text: String, whenMs: Long) {
+        var changed = false
+        if (title.isNotBlank() && title != currentCallName) {
+            currentCallName = title
+            changed = true
+        }
+        if (text.isNotBlank()) {
+            if (currentCallNumber.isBlank() && text.any { it.isDigit() }) {
+                currentCallNumber = text.trim()
+                changed = true
+            }
+        }
+        if (whenMs > 0 && currentCallStartTimeMs != whenMs) {
+            currentCallStartTimeMs = whenMs
+            changed = true
+        }
+
+        if (currentCallState != "idle") {
+            broadcastCallState(currentCallState)
+        } else if (changed && (title.isNotBlank() || text.isNotBlank())) {
+            currentCallState = "active"
+            startCallSyncTimer()
+            broadcastCallState("active")
+        }
+    }
+
+    fun onCallNotificationRemoved() {
+        if (currentCallState != "idle") {
+            val tm = telephonyManager ?: getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
+            val state = tm?.callState ?: TelephonyManager.CALL_STATE_IDLE
+            if (state == TelephonyManager.CALL_STATE_IDLE) {
+                handleCallStateTransition(TelephonyManager.CALL_STATE_IDLE, null)
+            }
+        }
+    }
+
+    private fun startCallSyncTimer() {
+        stopCallSyncTimer()
+        callDurationSyncRunnable = object : Runnable {
+            override fun run() {
+                if (currentCallState == "active") {
+                    broadcastCallState("active")
+                    callSyncHandler.postDelayed(this, 1000)
+                }
+            }
+        }
+        callSyncHandler.postDelayed(callDurationSyncRunnable!!, 1000)
+    }
+
+    private fun stopCallSyncTimer() {
+        callDurationSyncRunnable?.let { callSyncHandler.removeCallbacks(it) }
+        callDurationSyncRunnable = null
+    }
+
+    private fun tryResolveContactName(number: String): String {
+        try {
+            val uri = android.net.Uri.withAppendedPath(ContactsContract.PhoneLookup.CONTENT_FILTER_URI, android.net.Uri.encode(number))
+            contentResolver.query(uri, arrayOf(ContactsContract.PhoneLookup.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val idx = cursor.getColumnIndex(ContactsContract.PhoneLookup.DISPLAY_NAME)
+                    if (idx >= 0) return cursor.getString(idx) ?: ""
+                }
+            }
+        } catch (_: Exception) {}
+        return ""
+    }
+
+    fun broadcastCallState(stateStr: String) {
+        currentCallState = stateStr
+        val durationSec = if (currentCallStartTimeMs > 0 && stateStr == "active") {
+            Math.max(0L, (System.currentTimeMillis() - currentCallStartTimeMs) / 1000L)
+        } else {
+            0L
+        }
+        val (route, routeName) = getCurrentAudioRouteInfo()
+
+        val obj = org.json.JSONObject().apply {
+            put("type", "call_state_changed")
+            put("state", stateStr)
+            put("is_ringing", stateStr == "ringing")
+            put("is_active", stateStr == "active")
+            put("number", currentCallNumber)
+            put("name", currentCallName)
+            put("duration_sec", durationSec)
+            put("audio_route", route)
+            put("audio_route_name", routeName)
+            put("timestamp", System.currentTimeMillis())
+        }
+        sendRaw(obj.toString())
+    }
+
     fun applyCallAudioRoute(route: String) {
         val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
         try {
@@ -997,6 +1131,8 @@ class IdroidService : Service() {
                             val speaker = availableDevices.find { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
                             if (speaker != null) audioManager.setCommunicationDevice(speaker)
                         }
+                        @Suppress("DEPRECATION")
+                        audioManager.isSpeakerphoneOn = false
                     }
                     "phone" -> {
                         val earpiece = availableDevices.find { it.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE }
@@ -1029,6 +1165,7 @@ class IdroidService : Service() {
                     }
                 }
             }
+            broadcastCallState(currentCallState)
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -1042,27 +1179,35 @@ class IdroidService : Service() {
             else -> "idle"
         }
 
+        if (!phoneNumber.isNullOrBlank()) {
+            currentCallNumber = phoneNumber
+            if (currentCallName.isBlank()) {
+                currentCallName = tryResolveContactName(phoneNumber)
+            }
+        }
+
         if (stateStr == "ringing" || stateStr == "active") {
             pausePhoneMediaForCall()
             if (stateStr == "active") {
-                applyCallAudioRoute("phone_speaker")
+                if (currentCallStartTimeMs == 0L) {
+                    currentCallStartTimeMs = System.currentTimeMillis()
+                }
+                startCallSyncTimer()
             }
         } else if (stateStr == "idle") {
+            stopCallSyncTimer()
             resumePhoneMediaAfterCall()
             val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 audioManager?.clearCommunicationDevice()
             }
             audioManager?.mode = AudioManager.MODE_NORMAL
+            currentCallStartTimeMs = 0L
+            currentCallName = ""
+            currentCallNumber = ""
         }
 
-        val obj = org.json.JSONObject().apply {
-            put("type", "call_state_changed")
-            put("state", stateStr)
-            put("number", phoneNumber ?: "")
-            put("timestamp", System.currentTimeMillis())
-        }
-        sendRaw(obj.toString())
+        broadcastCallState(stateStr)
 
         // When call terminates or transitions to idle, immediately push updated call history
         if (stateStr == "idle") {

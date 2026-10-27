@@ -332,9 +332,14 @@ pub fn start_companion_server() {
                                 "call_state_changed" => {
                                     let state = val.get("state").and_then(|v| v.as_str()).unwrap_or("idle").to_string();
                                     let number = val.get("number").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                    let name = val.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                    let duration_sec = val.get("duration_sec").and_then(|v| v.as_u64()).unwrap_or(0);
+                                    let audio_route = val.get("audio_route").and_then(|v| v.as_str()).map(|s| s.to_string());
+                                    let audio_route_name = val.get("audio_route_name").and_then(|v| v.as_str()).map(|s| s.to_string());
+
                                     let is_ringing = state == "ringing";
                                     let is_active = state == "active";
-                                    println!("[Idroid Server] Cross-device call state changed: {} (number: {})", state, number);
+                                    println!("[Idroid Server] Cross-device call state changed: {} (name: {}, number: {}, duration: {}s, route: {:?})", state, name, number, duration_sec, audio_route);
                                     if let Ok(mut guard) = CURRENT_CALL_STATE.lock() {
                                         guard.state = state.clone();
                                         guard.is_ringing = is_ringing;
@@ -342,12 +347,30 @@ pub fn start_companion_server() {
                                         if !number.is_empty() {
                                             guard.number = number.clone();
                                         }
+                                        if !name.is_empty() {
+                                            guard.name = name.clone();
+                                        }
+                                        if state == "idle" {
+                                            guard.number = String::new();
+                                            guard.name = String::new();
+                                            guard.duration_sec = 0;
+                                            guard.audio_route = None;
+                                            guard.audio_route_name = None;
+                                        } else {
+                                            guard.duration_sec = duration_sec;
+                                            guard.audio_route = audio_route.clone();
+                                            guard.audio_route_name = audio_route_name.clone();
+                                        }
                                     }
                                     super::emit_to_windows("call_state_changed", serde_json::json!({
                                         "state": state,
                                         "is_ringing": is_ringing,
                                         "is_active": is_active,
-                                        "number": number
+                                        "number": number,
+                                        "name": name,
+                                        "duration_sec": duration_sec,
+                                        "audio_route": audio_route,
+                                        "audio_route_name": audio_route_name
                                     }));
 
                                     if is_ringing || is_active {
