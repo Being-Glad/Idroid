@@ -4356,7 +4356,7 @@ function renderApkDownloadModal() {
           <!-- Title & Official Release Pill -->
           <div style="display: flex; align-items: center; justify-content: center; gap: 8px; margin-bottom: 6px;">
             <h3 style="font-size: 19px; font-weight: 700; color: #ffffff; margin: 0; letter-spacing: -0.02em;">Get Idroid Companion</h3>
-            <span style="font-size: 10.5px; font-weight: 700; text-transform: uppercase; padding: 2px 7px; border-radius: 6px; background: rgba(30, 176, 94, 0.18); border: 1px solid rgba(74, 227, 139, 0.35); color: #4AE38B; letter-spacing: 0.04em;">v1.0.1</span>
+            <span style="font-size: 10.5px; font-weight: 700; text-transform: uppercase; padding: 2px 7px; border-radius: 6px; background: rgba(30, 176, 94, 0.18); border: 1px solid rgba(74, 227, 139, 0.35); color: #4AE38B; letter-spacing: 0.04em;">v0.1.0-beta</span>
           </div>
 
           <p style="font-size: 12.5px; color: var(--text-secondary); margin: 0 0 20px 0; line-height: 1.45; max-width: 320px; margin-left: auto; margin-right: auto;">
