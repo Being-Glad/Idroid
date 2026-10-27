@@ -46,6 +46,10 @@ end try
 
 #[tauri::command]
 pub fn make_phone_call(number: String) -> Result<String, String> {
+    if !is_device_connected() {
+        return Err("No device connected".into());
+    }
+
     let clean_num: String = number.chars().filter(|c| c.is_ascii_digit() || *c == '+' || *c == '*' || *c == '#').collect();
     if clean_num.is_empty() {
         return Err("Please enter a valid phone number".into());
@@ -72,6 +76,10 @@ pub fn make_phone_call(number: String) -> Result<String, String> {
 
 #[tauri::command]
 pub fn end_phone_call() -> Result<String, String> {
+    if !is_device_connected() {
+        return Err("No device connected".into());
+    }
+
     // 1. Android keyevent 6 (KEYCODE_ENDCALL)
     let _ = adb_command(&["shell", "input", "keyevent", "6"]).output();
     // 2. Telecom end-call
@@ -95,6 +103,10 @@ pub fn end_phone_call() -> Result<String, String> {
 
 #[tauri::command]
 pub fn answer_phone_call() -> Result<String, String> {
+    if !is_device_connected() {
+        return Err("No device connected".into());
+    }
+
     pause_all_media_for_call();
 
     let _ = adb_command(&["shell", "input", "keyevent", "5"]).output(); // KEYCODE_CALL
@@ -113,6 +125,10 @@ pub fn answer_phone_call() -> Result<String, String> {
 
 #[tauri::command]
 pub fn set_call_audio_route(route: String) -> Result<String, String> {
+    if !is_device_connected() {
+        return Err("No device connected".into());
+    }
+
     println!("[Idroid Audio] Switching call audio route to: {}", route);
     
     // Notify Android companion service over TCP for direct AudioManager SCO/Speaker switching
@@ -143,8 +159,14 @@ pub fn set_call_audio_route(route: String) -> Result<String, String> {
 #[tauri::command]
 pub fn get_call_state() -> Result<CallStateInfo, String> {
     if !is_device_connected() {
-        if let Ok(guard) = CURRENT_CALL_STATE.lock() {
-            return Ok(guard.clone());
+        if let Ok(mut guard) = CURRENT_CALL_STATE.lock() {
+            *guard = CallStateInfo {
+                state: "idle".into(),
+                is_ringing: false,
+                is_active: false,
+                number: String::new(),
+                name: String::new(),
+            };
         }
         return Ok(CallStateInfo {
             state: "idle".into(),
@@ -279,6 +301,9 @@ pub fn check_incoming_call() -> Result<IncomingCallInfo, String> {
 
 #[tauri::command]
 pub fn toggle_call_mute(muted: bool) -> Result<bool, String> {
+    if !is_device_connected() {
+        return Err("No device connected".into());
+    }
     let flag = if muted { "true" } else { "false" };
     let _ = adb_command(&["shell", "cmd", "audio", "set-microphone-mute", flag]).output();
     let _ = adb_command(&["shell", "input", "keyevent", "91"]).output();

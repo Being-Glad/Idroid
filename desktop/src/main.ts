@@ -2348,7 +2348,7 @@ function renderContactsDirectoryModal(): string {
 
 // MARK: - Floating Apple Continuity Style In-Call HUD
 function renderFloatingCallHUD(): string {
-  if (!isCallActive) return '';
+  if (!isCallActive || device.status !== 'Connected') return '';
 
   const mins = Math.floor(callDurationSec / 60)
     .toString()
@@ -2464,7 +2464,7 @@ function renderFloatingCallHUD(): string {
 
 // MARK: - Incoming Call Alert Banner
 function renderIncomingCallBanner(): string {
-  if (!incomingCall) return '';
+  if (!incomingCall || device.status !== 'Connected') return '';
 
   const name = incomingCall.name || incomingCall.number || 'Incoming Phone Call';
   const num = incomingCall.number || 'Wireless Connected Phone';
@@ -2784,6 +2784,9 @@ async function pollDeviceTelemetry() {
         notificationList = [];
         seenNotificationIds.clear();
         hasSeededNotifications = false;
+        if (isCallActive || incomingCall) {
+          handleRemoteCallEnded();
+        }
         // Preserve callHistory and clipboardHistory across disconnects
       } else if (prevStatus === 'Disconnected' && device.status === 'Connected') {
         playConnectionCelebration(device.name);
@@ -2831,7 +2834,12 @@ async function pollDeviceTelemetry() {
 }
 
 async function pollCallStateSync() {
-  if (!isCallActive && !incomingCall && device.status !== 'Connected') return;
+  if (device.status !== 'Connected') {
+    if (isCallActive || incomingCall) {
+      handleRemoteCallEnded();
+    }
+    return;
+  }
   const invoke = await getInvoke();
   if (!invoke) return;
 
@@ -2951,7 +2959,7 @@ function triggerCallEndedTransientBanner() {
 }
 
 function handleRemoteCallEnded() {
-  const wasActive = isCallActive || Boolean(incomingCall);
+  const wasActive = (isCallActive || Boolean(incomingCall)) && device.status === 'Connected';
   incomingCall = null;
   isCallActive = false;
   isCallMuted = false;
@@ -3254,7 +3262,7 @@ function triggerLiveNotificationToast(n: NotificationItem) {
      (n.text || '').toLowerCase().includes('incoming') ||
      (n.text || '').toLowerCase().includes('ringing'));
 
-  if (isIncomingCall && !isCallActive && !incomingCall) {
+  if (device.status === 'Connected' && isIncomingCall && !isCallActive && !incomingCall) {
     incomingCall = {
       name: n.title || 'Incoming Phone Call',
       number: n.text || n.title || 'Phone Call',
@@ -3988,6 +3996,7 @@ async function handleClearAllCallHistory() {
 }
 
 async function handleStartCall(targetNumber?: string) {
+  if (device.status !== 'Connected') return;
   const inputEl = document.getElementById('input-dialer-number') as HTMLInputElement;
   if (inputEl && targetNumber === undefined) {
     dialerInputNumber = inputEl.value;
@@ -4063,6 +4072,10 @@ async function handleStartCall(targetNumber?: string) {
 }
 
 async function handleAcceptIncomingCall(number?: string, name?: string) {
+  if (device.status !== 'Connected') {
+    incomingCall = null;
+    return;
+  }
   const targetNum = number || (incomingCall ? incomingCall.number : 'Unknown');
   const targetName = name || (incomingCall ? incomingCall.name : targetNum);
   incomingCall = null;
@@ -8815,6 +8828,7 @@ async function setupRealtimeCallListeners() {
   try {
     // 1. Live phone call state changes pushed directly from Android TCP & telephony registry
     await listen('call_state_changed', (event: any) => {
+      if (device.status !== 'Connected') return;
       const callState = event.payload as CallStateInfo;
       if (!callState) return;
       console.log('[Idroid Calls Event] Live call state received:', callState.state);
