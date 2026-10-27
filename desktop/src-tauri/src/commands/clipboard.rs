@@ -34,7 +34,15 @@ fn get_history_file_path() -> PathBuf {
 pub fn load_persisted_clipboard_history() {
     let path = get_history_file_path();
     if let Ok(data) = fs::read_to_string(&path) {
-        if let Ok(snippets) = serde_json::from_str::<Vec<ClipboardSnippet>>(&data) {
+        if let Ok(mut snippets) = serde_json::from_str::<Vec<ClipboardSnippet>>(&data) {
+            snippets.truncate(50);
+            for s in &mut snippets {
+                if let Some(ref img) = s.image_base64 {
+                    if img.len() > 150_000 {
+                        s.image_base64 = None;
+                    }
+                }
+            }
             if let Ok(mut guard) = CLIPBOARD_HISTORY.lock() {
                 *guard = snippets;
                 sort_clipboard_snippets(&mut guard);

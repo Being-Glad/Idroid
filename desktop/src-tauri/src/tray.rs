@@ -1,5 +1,5 @@
 use tauri::{
-    menu::{IconMenuItemBuilder, Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder},
+    menu::{Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder},
     tray::TrayIconBuilder,
     AppHandle, Manager,
 };
@@ -62,22 +62,10 @@ pub fn build_tray_menu<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Menu<R>,
         for (i, clip) in history_items.iter().take(6).enumerate() {
             let item_id = format!("copy_clip_{}", i);
             let pin_marker = if clip.pinned { "★ " } else { "" };
-            if let Some(ref img_b64) = clip.image_base64 {
-                use base64::Engine;
+            if clip.image_base64.is_some() {
                 let title = format!("{}🖼️ Copied Image", pin_marker);
-                let mut added = false;
-                if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(img_b64) {
-                    if let Ok(img) = tauri::image::Image::from_bytes(&bytes) {
-                        if let Ok(item) = IconMenuItemBuilder::with_id(&item_id, &title).icon(img).build(app) {
-                            clip_submenu_builder = clip_submenu_builder.item(&item);
-                            added = true;
-                        }
-                    }
-                }
-                if !added {
-                    if let Ok(item) = MenuItemBuilder::with_id(&item_id, &title).build(app) {
-                        clip_submenu_builder = clip_submenu_builder.item(&item);
-                    }
+                if let Ok(item) = MenuItemBuilder::with_id(&item_id, &title).build(app) {
+                    clip_submenu_builder = clip_submenu_builder.item(&item);
                 }
             } else {
                 let single_line = clip.text.lines().next().unwrap_or(&clip.text).trim();
