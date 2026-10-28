@@ -1,6 +1,6 @@
 [package]
 name = "idroid-desktop"
-version = "1.0.0"
+version = "0.1.0-beta"
 description = "Idroid Desktop Host — Native macOS Bridge for Android Continuity"
 authors = ["Idroid Contributors"]
 license = "Apache-2.0"
